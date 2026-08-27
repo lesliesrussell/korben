@@ -166,8 +166,9 @@ specification's reference example adapted to what exists.
 - **HTTP.** `std.http` is written in Korben over `std.net`: requests and
   responses are ordinary records, errors an ordinary enum, and routing is
   ordinary pattern matching. `examples/http.kb` is the specification's section
-  29 reference program. Requests are handled one at a time; concurrent handling
-  needs the async runtime.
+  29 reference program. Requests are handled one at a time: the sockets block,
+  and a blocking read stalls the cooperative scheduler, so concurrent handling
+  needs the non-blocking I/O described under *Not yet implemented*.
 - **C interoperation.** `(ffi/c-library ...)` and `(ffi/c-fn ...)` declare typed
   foreign functions; `korben ffi c <header>` generates them from C prototypes.
   A declaration asserts a contract the compiler cannot verify, so it is an
@@ -339,8 +340,8 @@ is ready. All ten hold today:
 | 9 | Readable errors for type, macro, exhaustiveness, and ownership faults | `examples/ownership.kb` |
 | 10 | Reproduce the build from a lockfile without install scripts | `korben.lock`, `korben audit` |
 
-What that does *not* mean is that the specification is finished: the async
-runtime, a package registry, TLS, and the language server are all still ahead.
+What that does *not* mean is that the specification is finished: parallelism, a
+package registry, TLS, and the language server are all still ahead.
 
 ## Repository layout
 

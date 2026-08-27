@@ -1,7 +1,10 @@
-;;; The specification's reference example, adapted to the v0.1 runtime.
+;;; The specification's reference example, reduced to its handler.
 ;;;
-;;; Section 29 routes real HTTP requests; `std.http` arrives with the async
-;;; runtime in Milestone D, so this version drives the same handler directly.
+;;; Section 29 routes real HTTP requests, and `examples/http.kb` does exactly
+;;; that over `std.http`. This version calls the same handler directly, so the
+;;; typing, error enum, and pattern matching are visible without a server.
+;;;
+;;; Run it with `korben run examples/greeting.kb`.
 (module greeting
   (use std.json :as json)
   (use std.log :as log))

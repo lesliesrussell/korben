@@ -6,9 +6,11 @@
 //! the receiver, so they borrow it rather than consuming it, which is what lets
 //! an accept loop keep using its listener.
 //!
-//! Reads and writes block. Concurrent handling of several connections needs the
-//! async runtime, which is Milestone D; until then a server handles one request
-//! at a time on the accepting task.
+//! Reads and writes block. The async runtime schedules cooperatively and a
+//! started task cannot suspend, so a blocking read stalls the whole scheduler
+//! and a server handles one request at a time on the accepting task. Handling
+//! connections concurrently needs non-blocking sockets driven by the scheduler,
+//! which these operations do not yet use.
 
 // korben-7zt
 
