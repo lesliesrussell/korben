@@ -1,12 +1,16 @@
 //! JSON encoding and decoding for `std.json`.
 //!
+//! Shared by both execution modes.
+//!
 //! Serialization is a library, not privileged syntax: records encode as
 //! objects, keywords as strings, and decoding produces maps with string keys.
 
+// korben-vtx
+
 // korben-6bc
 
-use crate::value::{MapValue, RecordValue, Value};
-use korben_syntax::diag::json_string;
+use crate::value::{quote_string, MapValue, RecordValue, Value};
+
 use std::rc::Rc;
 
 pub fn encode(value: &Value, pretty: bool) -> String {
@@ -20,9 +24,9 @@ fn write_value(out: &mut String, value: &Value, pretty: bool, depth: usize) {
         Value::Nil => out.push_str("null"),
         Value::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
         Value::Int(value) => out.push_str(&value.to_string()),
-        Value::Float(value) => out.push_str(&korben_syntax::format_float(*value)),
-        Value::Str(text) => out.push_str(&json_string(text)),
-        Value::Keyword(name) | Value::Symbol(name) => out.push_str(&json_string(name)),
+        Value::Float(value) => out.push_str(&crate::value::format_float(*value)),
+        Value::Str(text) => out.push_str(&quote_string(text)),
+        Value::Keyword(name) | Value::Symbol(name) => out.push_str(&quote_string(name)),
         Value::Vector(items) | Value::Set(items) => {
             write_seq(out, items.iter(), pretty, depth, '[', ']', |out, item, pretty, depth| {
                 write_value(out, item, pretty, depth)
@@ -37,7 +41,7 @@ fn write_value(out: &mut String, value: &Value, pretty: bool, depth: usize) {
                 '{',
                 '}',
                 |out, (key, value), pretty, depth| {
-                    out.push_str(&json_string(&key_text(key)));
+                    out.push_str(&quote_string(&key_text(key)));
                     out.push(':');
                     if pretty {
                         out.push(' ');
@@ -55,7 +59,7 @@ fn write_value(out: &mut String, value: &Value, pretty: bool, depth: usize) {
                 '{',
                 '}',
                 |out, (name, value), pretty, depth| {
-                    out.push_str(&json_string(name));
+                    out.push_str(&quote_string(name));
                     out.push(':');
                     if pretty {
                         out.push(' ');
@@ -67,7 +71,7 @@ fn write_value(out: &mut String, value: &Value, pretty: bool, depth: usize) {
         Value::Variant(variant) => {
             // Enums encode as a tag plus payload so decoding stays unambiguous.
             if variant.fields.is_empty() {
-                out.push_str(&json_string(&variant.variant));
+                out.push_str(&quote_string(&variant.variant));
                 return;
             }
             if variant.fields.len() == 1 && matches!(&*variant.type_name, "Option" | "Result") {
@@ -83,18 +87,18 @@ fn write_value(out: &mut String, value: &Value, pretty: bool, depth: usize) {
                 .collect();
             let _ = entries;
             out.push('{');
-            out.push_str(&json_string("$tag"));
+            out.push_str(&quote_string("$tag"));
             out.push(':');
-            out.push_str(&json_string(&variant.variant));
+            out.push_str(&quote_string(&variant.variant));
             for (name, value) in &variant.fields {
                 out.push(',');
-                out.push_str(&json_string(name));
+                out.push_str(&quote_string(name));
                 out.push(':');
                 write_value(out, value, pretty, depth);
             }
             out.push('}');
         }
-        other => out.push_str(&json_string(&other.to_string())),
+        other => out.push_str(&quote_string(&other.to_string())),
     }
 }
 
@@ -102,7 +106,7 @@ fn key_text(key: &Value) -> String {
     match key {
         Value::Str(text) => (**text).clone(),
         Value::Keyword(name) | Value::Symbol(name) => name.to_string(),
-        other => crate::value::Display(other).to_string(),
+        other => crate::value::display(other),
     }
 }
 

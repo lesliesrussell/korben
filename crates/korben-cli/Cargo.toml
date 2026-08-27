@@ -12,3 +12,4 @@ path = "src/main.rs"
 [dependencies]
 korben-syntax.workspace = true
 korben-core.workspace = true
+korben-runtime.workspace = true

@@ -8,8 +8,11 @@
 // korben-6bc
 
 use crate::ast::*;
-use crate::value::*;
-use korben_syntax::diag::Diagnostic;
+use crate::value::{
+    apply, as_closure, as_syntax, bind_args, closure_value, display, loc_of, member, member_names,
+    span_of, syntax_value, Arg as RtArg, Assign, Caller, Closure, Env, EvalResult, Fault, Flow,
+    Loc, MapValue, ModuleRuntime, Param as RtParam, RecordValue, Value,
+};
 use korben_syntax::span::Span;
 use korben_syntax::Syntax;
 use std::collections::HashMap;
@@ -66,8 +69,29 @@ pub struct Interp {
     pub in_unsafe: bool,
     /// Macros visible during expansion, keyed by name.
     pub macros: HashMap<String, Rc<crate::expand::MacroEntry>>,
-    /// Arguments the program was launched with, exposed by `std.process/args`.
-    pub program_args: Vec<String>,
+}
+
+/// The runtime calls back into the interpreter through this trait: it owns
+/// closure bodies, protocol implementations, and program output.
+impl Caller for Interp {
+    fn call_host(&mut self, function: &Value, args: Vec<RtArg>, loc: Loc) -> EvalResult {
+        match as_closure(function) {
+            Some(closure) => self.call_closure(&closure, args, span_of(loc)),
+            None => Err(Flow::fault(
+                Fault::error("not callable")
+                    .with_code("not-callable")
+                    .at(loc, "this value has no callable body"),
+            )),
+        }
+    }
+
+    fn find_method(&mut self, receiver: &Value, method: &str) -> Option<Value> {
+        Interp::find_method(self, receiver, method)
+    }
+
+    fn write(&mut self, text: &str) {
+        self.out.write(text);
+    }
 }
 
 impl Default for Interp {
@@ -95,7 +119,6 @@ impl Interp {
             tests: Vec::new(),
             in_unsafe: false,
             macros: HashMap::new(),
-            program_args: Vec::new(),
         };
         crate::builtins::install(&mut interp);
         interp
@@ -159,11 +182,11 @@ impl Interp {
                 Stmt::Let { pattern, value, span, .. } => match self.eval(value, &scope) {
                     Ok(value) => {
                         if !self.bind_pattern(pattern, &value, &scope) {
-                            outcome = Err(Flow::panic(
-                                Diagnostic::error("binding pattern did not match")
+                            outcome = Err(Flow::fault(
+                                Fault::error("binding pattern did not match")
                                     .with_code("let-pattern")
                                     .at(
-                                        *span,
+                                        loc_of(*span),
                                         format!("value `{value}` does not match this pattern"),
                                     )
                                     .help("use `match` when a binding can fail"),
@@ -228,7 +251,7 @@ impl Interp {
                         InterpPart::Text(literal) => text.push_str(literal),
                         InterpPart::Expr(expr) => {
                             let value = self.eval(expr, env)?;
-                            text.push_str(&crate::value::Display(&value).to_string());
+                            text.push_str(&display(&value));
                         }
                     }
                 }
@@ -236,10 +259,10 @@ impl Interp {
             }
             Expr::Var(name, span) => self.lookup_var(name, *span, env),
             Expr::Path { module, name, span } => self.lookup_path(module, name).ok_or_else(|| {
-                Flow::panic(
-                    Diagnostic::error(format!("`{module}/{name}` is not defined"))
+                Flow::fault(
+                    Fault::error(format!("`{module}/{name}` is not defined"))
                         .with_code("unbound-name")
-                        .at(*span, "not found in that module")
+                        .at(loc_of(*span), "not found in that module")
                         .help(format!("check that `{module}` is imported and exports `{name}`")),
                 )
             }),
@@ -290,7 +313,7 @@ impl Interp {
                 }
             }
             Expr::Do(body, _) => self.eval_body(body, env),
-            Expr::Lambda(decl, _) => Ok(Value::Closure(Rc::new(Closure {
+            Expr::Lambda(decl, _) => Ok(closure_value(Rc::new(Closure {
                 decl: decl.clone(),
                 env: env.clone(),
                 module: self.current.name.clone(),
@@ -317,10 +340,10 @@ impl Interp {
                     }
                     return self.eval(&arm.body, &scope);
                 }
-                Err(Flow::panic(
-                    Diagnostic::error("no match arm applied")
+                Err(Flow::fault(
+                    Fault::error("no match arm applied")
                         .with_code("match-failure")
-                        .at(*span, format!("`{value}` matched none of the arms"))
+                        .at(loc_of(*span), format!("`{value}` matched none of the arms"))
                         .help("add a `_` arm or handle the missing case"),
                 ))
             }
@@ -338,19 +361,17 @@ impl Interp {
                         Ok(value) => return Ok(value),
                         Err(Flow::Recur(next)) => {
                             if next.len() != bindings.len() {
-                                return Err(Flow::panic(
-                                    Diagnostic::error(
-                                        "`recur` argument count does not match the loop",
-                                    )
-                                    .with_code("recur-arity")
-                                    .at(
-                                        *span,
-                                        format!(
-                                            "loop binds {} value(s) but `recur` passed {}",
-                                            bindings.len(),
-                                            next.len()
+                                return Err(Flow::fault(
+                                    Fault::error("`recur` argument count does not match the loop")
+                                        .with_code("recur-arity")
+                                        .at(
+                                            loc_of(*span),
+                                            format!(
+                                                "loop binds {} value(s) but `recur` passed {}",
+                                                bindings.len(),
+                                                next.len()
+                                            ),
                                         ),
-                                    ),
                                 ));
                             }
                             values = next;
@@ -370,16 +391,16 @@ impl Interp {
                 let value = self.eval(value, env)?;
                 match env.assign(name, value) {
                     Assign::Done => Ok(Value::Nil),
-                    Assign::Immutable => Err(Flow::panic(
-                        Diagnostic::error(format!("cannot assign to `{name}`"))
+                    Assign::Immutable => Err(Flow::fault(
+                        Fault::error(format!("cannot assign to `{name}`"))
                             .with_code("immutable-assign")
-                            .at(*span, "this binding is immutable")
+                            .at(loc_of(*span), "this binding is immutable")
                             .help(format!("declare it with `(var {name} ...)` to allow `set!`")),
                     )),
-                    Assign::Unbound => Err(Flow::panic(
-                        Diagnostic::error(format!("cannot assign to `{name}`"))
+                    Assign::Unbound => Err(Flow::fault(
+                        Fault::error(format!("cannot assign to `{name}`"))
                             .with_code("unbound-assign")
-                            .at(*span, "no binding with this name is in scope")
+                            .at(loc_of(*span), "no binding with this name is in scope")
                             .help(format!("declare it with `(var {name} ...)` first")),
                     )),
                 }
@@ -394,23 +415,23 @@ impl Interp {
                             .map(|(_, value)| value.clone())
                             .unwrap_or(Value::Nil)),
                         "Err" | "None" => Err(Flow::Propagate(value.clone())),
-                        other => Err(Flow::panic(
-                            Diagnostic::error(format!("`?` cannot propagate `{other}`"))
+                        other => Err(Flow::fault(
+                            Fault::error(format!("`?` cannot propagate `{other}`"))
                                 .with_code("propagate-type")
-                                .at(*span, "expected a Result or an Option")
+                                .at(loc_of(*span), "expected a Result or an Option")
                                 .help("`?` works on Ok/Err and Some/None"),
                         )),
                     },
-                    other => Err(Flow::panic(
-                        Diagnostic::error("`?` needs a Result or an Option")
+                    other => Err(Flow::fault(
+                        Fault::error("`?` needs a Result or an Option")
                             .with_code("propagate-type")
-                            .at(*span, format!("found {}", other.type_name())),
+                            .at(loc_of(*span), format!("found {}", other.type_name())),
                     )),
                 }
             }
             Expr::Throw(inner, span) => {
                 let value = self.eval(inner, env)?;
-                Err(Flow::Condition(value, *span))
+                Err(Flow::Condition(value, loc_of(*span)))
             }
             Expr::Try { body, catches, finally, .. } => {
                 let result = self.eval_body(body, env);
@@ -460,7 +481,7 @@ impl Interp {
             Expr::Quote(syntax, _) => Ok(quote_value(syntax)),
             Expr::SyntaxQuote(template, _) => {
                 let built = self.build_template(template, env)?;
-                Ok(Value::Syntax(Rc::new(built)))
+                Ok(syntax_value(Rc::new(built)))
             }
         }
     }
@@ -474,13 +495,13 @@ impl Interp {
             return Ok(value);
         }
         let suggestion = self.suggest_name(name);
-        let mut diagnostic = Diagnostic::error(format!("`{name}` is not defined"))
+        let mut diagnostic = Fault::error(format!("`{name}` is not defined"))
             .with_code("unbound-name")
-            .at(span, "no binding with this name is in scope");
+            .at(loc_of(span), "no binding with this name is in scope");
         if let Some(suggestion) = suggestion {
             diagnostic = diagnostic.help(format!("did you mean `{suggestion}`?"));
         }
-        Err(Flow::panic(diagnostic))
+        Err(Flow::fault(diagnostic))
     }
 
     /// Closest known name by edit distance, used for `did you mean` help.
@@ -506,236 +527,65 @@ impl Interp {
             match self.eval_field_target(target, name, *field_span, env)? {
                 FieldTarget::Resolved(value) => {
                     let arguments = self.eval_args(args, env)?;
-                    return self.apply(value, arguments, span);
+                    return apply(self, &value, arguments, loc_of(span));
                 }
                 FieldTarget::Value(receiver) => {
                     let mut arguments = self.eval_args(args, env)?;
                     // A field holding a function is called directly.
-                    if let Ok(field) = self.field_of(&receiver, name, *field_span) {
-                        if matches!(field, Value::Closure(_) | Value::Native(_)) {
-                            return self.apply(field, arguments, span);
+                    if let Some(field) = member(&receiver, name) {
+                        if matches!(field, Value::Fn(_)) {
+                            return apply(self, &field, arguments, loc_of(span));
                         }
                         if arguments.is_empty() {
                             return Ok(field);
                         }
                     }
                     if let Some(method) = self.find_method(&receiver, name) {
-                        arguments.insert(0, (None, receiver));
-                        return self.apply(method, arguments, span);
+                        arguments.insert(0, RtArg::positional(receiver));
+                        return apply(self, &method, arguments, loc_of(span));
                     }
-                    return Err(Flow::panic(
-                        Diagnostic::error(format!(
-                            "`{}` has no member `{name}`",
-                            receiver.type_name()
-                        ))
-                        .with_code("unknown-member")
-                        .at(*field_span, "unknown field or method"),
+                    return Err(Flow::fault(
+                        Fault::error(format!("`{}` has no member `{name}`", receiver.type_name()))
+                            .with_code("unknown-member")
+                            .at(loc_of(*field_span), "unknown field or method")
+                            .help(format!("available fields: {}", member_names(&receiver))),
                     ));
                 }
             }
         }
         let function = self.eval(callee, env)?;
         let arguments = self.eval_args(args, env)?;
-        self.apply(function, arguments, span)
+        apply(self, &function, arguments, loc_of(span))
     }
 
-    fn eval_args(&mut self, args: &[Arg], env: &Env) -> Result<Vec<(Option<String>, Value)>, Flow> {
+    fn eval_args(&mut self, args: &[Arg], env: &Env) -> Result<Vec<RtArg>, Flow> {
         let mut values = Vec::with_capacity(args.len());
         for arg in args {
-            values.push((arg.keyword.clone(), self.eval(&arg.value, env)?));
+            values.push(RtArg { keyword: arg.keyword.clone(), value: self.eval(&arg.value, env)? });
         }
         Ok(values)
     }
 
+    /// Invoke a value. Dispatch itself lives in the runtime, so the interpreter
+    /// and generated code agree on arity, keyword arguments, and construction.
     pub fn apply(
         &mut self,
         function: Value,
         args: Vec<(Option<String>, Value)>,
         span: Span,
     ) -> EvalResult {
-        match function {
-            Value::Closure(closure) => self.call_closure(&closure, args, span),
-            Value::Native(native) => {
-                let flat = flatten_args(args);
-                if let Some(arity) = native.arity {
-                    if flat.len() < arity {
-                        return Err(Flow::panic(
-                            Diagnostic::error(format!(
-                                "`{}` expects at least {arity} argument(s)",
-                                native.name
-                            ))
-                            .with_code("arity")
-                            .at(span, format!("{} given", flat.len())),
-                        ));
-                    }
-                }
-                (native.func)(self, flat, span)
-            }
-            Value::Builtin(builtin) => self.apply_builtin(&builtin, args, span),
-            // Applying a non-function to no arguments yields the value itself,
-            // which is what makes `(None)` and `(user.name)` read naturally.
-            other if args.is_empty() => Ok(other),
-            other => Err(Flow::panic(
-                Diagnostic::error(format!("`{}` is not callable", other.type_name()))
-                    .with_code("not-callable")
-                    .at(span, format!("tried to call `{other}`")),
-            )),
-        }
+        let args = args.into_iter().map(|(keyword, value)| RtArg { keyword, value }).collect();
+        apply(self, &function, args, loc_of(span))
     }
 
-    /// Construct a record or variant, or dispatch a protocol method.
-    fn apply_builtin(
-        &mut self,
-        builtin: &Rc<Builtin>,
-        args: Vec<(Option<String>, Value)>,
-        span: Span,
-    ) -> EvalResult {
-        match &**builtin {
-            Builtin::Method { protocol, name } => {
-                let Some((_, receiver)) = args.first() else {
-                    return Err(Flow::panic(
-                        Diagnostic::error(format!("`{name}` needs a receiver"))
-                            .with_code("arity")
-                            .at(span, "protocol methods take the value they dispatch on"),
-                    ));
-                };
-                let receiver = receiver.clone();
-                match self.find_method(&receiver, name) {
-                    Some(method) => self.apply(method, args, span),
-                    None => Err(Flow::panic(
-                        Diagnostic::error(format!(
-                            "`{}` does not implement `{protocol}`",
-                            receiver.type_name()
-                        ))
-                        .with_code("missing-impl")
-                        .at(span, format!("no implementation of `{name}` for this type"))
-                        .help(format!("write `(impl {protocol} {} ...)`", receiver.type_name())),
-                    )),
-                }
-            }
-            Builtin::Ctor { type_name, variant, fields } => {
-                let mut values: Vec<(Sym, Value)> = Vec::with_capacity(fields.len());
-                let mut positional = Vec::new();
-                let mut named: Vec<(String, Value)> = Vec::new();
-                for (keyword, value) in args {
-                    match keyword {
-                        Some(name) => named.push((name, value)),
-                        None => positional.push(value),
-                    }
-                }
-
-                // A single record or map argument names the fields directly.
-                // With one declared field this is ambiguous, so it only applies
-                // when the argument's own field names match the declaration.
-                if named.is_empty() && positional.len() == 1 {
-                    let supplied: Option<Vec<(String, Value)>> = match &positional[0] {
-                        Value::Record(record) => Some(
-                            record
-                                .fields
-                                .iter()
-                                .map(|(name, value)| (name.to_string(), value.clone()))
-                                .collect(),
-                        ),
-                        Value::Map(map) => Some(
-                            map.entries
-                                .iter()
-                                .map(|(key, value)| {
-                                    (crate::value::Display(key).to_string(), value.clone())
-                                })
-                                .collect(),
-                        ),
-                        _ => None,
-                    };
-                    if let Some(supplied) = supplied {
-                        let names_match = fields.len() != 1
-                            || (supplied.len() == fields.len()
-                                && supplied
-                                    .iter()
-                                    .all(|(name, _)| fields.iter().any(|field| &**field == name)));
-                        if names_match {
-                            named = supplied;
-                            positional.clear();
-                        }
-                    }
-                }
-
-                if !positional.is_empty() && positional.len() != fields.len() {
-                    return Err(Flow::panic(
-                        Diagnostic::error(format!(
-                            "`{}` expects {} field(s) but got {}",
-                            variant.as_deref().unwrap_or(type_name),
-                            fields.len(),
-                            positional.len()
-                        ))
-                        .with_code("arity")
-                        .at(span, format!("fields: {}", render_fields(fields))),
-                    ));
-                }
-
-                for (index, field) in fields.iter().enumerate() {
-                    let value = if !positional.is_empty() {
-                        positional[index].clone()
-                    } else {
-                        match named.iter().find(|(name, _)| name.as_str() == &**field) {
-                            Some((_, value)) => value.clone(),
-                            None => {
-                                return Err(Flow::panic(
-                                    Diagnostic::error(format!(
-                                        "missing field `{field}` for `{}`",
-                                        variant.as_deref().unwrap_or(type_name)
-                                    ))
-                                    .with_code("missing-field")
-                                    .at(span, format!("fields: {}", render_fields(fields))),
-                                ))
-                            }
-                        }
-                    };
-                    values.push((field.clone(), value));
-                }
-
-                if let Some(unknown) = named
-                    .iter()
-                    .find(|(name, _)| !fields.iter().any(|field| &**field == name.as_str()))
-                {
-                    return Err(Flow::panic(
-                        Diagnostic::error(format!(
-                            "`{}` has no field `{}`",
-                            variant.as_deref().unwrap_or(type_name),
-                            unknown.0
-                        ))
-                        .with_code("unknown-field")
-                        .at(span, format!("fields: {}", render_fields(fields))),
-                    ));
-                }
-
-                Ok(match variant {
-                    Some(variant) => Value::Variant(Rc::new(VariantValue {
-                        type_name: type_name.clone(),
-                        variant: variant.clone(),
-                        fields: values,
-                    })),
-                    None => Value::Record(Rc::new(RecordValue {
-                        type_name: Some(type_name.clone()),
-                        fields: values,
-                    })),
-                })
-            }
-        }
-    }
-
-    fn call_closure(
-        &mut self,
-        closure: &Rc<Closure>,
-        args: Vec<(Option<String>, Value)>,
-        span: Span,
-    ) -> EvalResult {
+    fn call_closure(&mut self, closure: &Rc<Closure>, args: Vec<RtArg>, span: Span) -> EvalResult {
         self.depth += 1;
         if self.depth > self.max_depth {
             self.depth -= 1;
-            return Err(Flow::panic(
-                Diagnostic::error("recursion limit reached")
+            return Err(Flow::fault(
+                Fault::error("recursion limit reached")
                     .with_code("stack-overflow")
-                    .at(span, format!("while calling `{}`", closure.decl.name))
+                    .at(loc_of(span), format!("while calling `{}`", closure.decl.name))
                     .help("use `loop`/`recur` for unbounded iteration"),
             ));
         }
@@ -748,13 +598,14 @@ impl Interp {
         let mut arguments = args;
         let result = loop {
             let scope = closure.env.child();
-            if let Err(flow) = self.bind_params(&closure.decl, arguments, &scope, span) {
-                break Err(flow);
+            match self.bind_params(&closure.decl, arguments, &scope, span) {
+                Ok(()) => {}
+                Err(flow) => break Err(flow),
             }
             // Named self-recursion: `recur` re-enters with new arguments.
             match self.eval_body(&closure.decl.body, &scope) {
                 Err(Flow::Recur(values)) => {
-                    arguments = values.into_iter().map(|value| (None, value)).collect();
+                    arguments = values.into_iter().map(RtArg::positional).collect();
                     continue;
                 }
                 // `?` propagation stops at the function boundary.
@@ -771,66 +622,26 @@ impl Interp {
     fn bind_params(
         &mut self,
         decl: &FnDecl,
-        args: Vec<(Option<String>, Value)>,
+        args: Vec<RtArg>,
         scope: &Env,
         span: Span,
     ) -> Result<(), Flow> {
-        let mut positional: Vec<Value> = Vec::new();
-        let mut named: Vec<(String, Value)> = Vec::new();
-        for (keyword, value) in args {
-            match keyword {
-                // A keyword argument only binds by name when the callee declares it.
-                Some(name)
-                    if decl
-                        .params
-                        .iter()
-                        .any(|param| param.keyword.as_deref() == Some(name.as_str())) =>
-                {
-                    named.push((name, value));
-                }
-                Some(name) => {
-                    positional.push(Value::Keyword(Rc::from(name.as_str())));
-                    positional.push(value);
-                }
-                None => positional.push(value),
-            }
-        }
-
-        let required: Vec<&Param> =
-            decl.params.iter().filter(|param| param.keyword.is_none()).collect();
-        if positional.len() != required.len() {
-            let expected = required.len();
-            let got = positional.len();
-            return Err(Flow::panic(
-                Diagnostic::error(format!(
-                    "`{}` expects {expected} argument(s) but got {got}",
-                    decl.name
-                ))
-                .with_code("arity")
-                .at(span, "wrong number of arguments")
-                .secondary(decl.span, "defined here"),
-            ));
-        }
-        for (param, value) in required.iter().zip(positional) {
-            scope.define(Rc::from(param.name.as_str()), value);
-        }
-        for param in decl.params.iter().filter(|param| param.keyword.is_some()) {
-            let keyword = param.keyword.as_deref().unwrap();
-            let value = match named.iter().find(|(name, _)| name == keyword) {
-                Some((_, value)) => value.clone(),
+        let params: Vec<RtParam> = decl
+            .params
+            .iter()
+            .map(|param| RtParam {
+                name: Rc::from(param.name.as_str()),
+                keyword: param.keyword.as_deref().map(Rc::from),
+                has_default: param.default.is_some(),
+            })
+            .collect();
+        let bound = bind_args(&decl.name, &params, loc_of(decl.span), args, loc_of(span))?;
+        for (param, value) in decl.params.iter().zip(bound) {
+            let value = match value {
+                Some(value) => value,
                 None => match &param.default {
                     Some(default) => self.eval(default, scope)?,
-                    None => {
-                        return Err(Flow::panic(
-                            Diagnostic::error(format!(
-                                "`{}` requires the named argument `:{keyword}`",
-                                decl.name
-                            ))
-                            .with_code("missing-argument")
-                            .at(span, "named argument not supplied")
-                            .secondary(param.span, "declared here"),
-                        ))
-                    }
+                    None => Value::Nil,
                 },
             };
             scope.define(Rc::from(param.name.as_str()), value);
@@ -856,13 +667,13 @@ impl Interp {
                         return Ok(FieldTarget::Resolved(value));
                     }
                     let suggestion = self.suggest_name(root);
-                    let mut diagnostic = Diagnostic::error(format!("`{root}` is not defined"))
+                    let mut diagnostic = Fault::error(format!("`{root}` is not defined"))
                         .with_code("unbound-name")
-                        .at(span, format!("no binding or module named `{root}`"));
+                        .at(loc_of(span), format!("no binding or module named `{root}`"));
                     if let Some(suggestion) = suggestion {
                         diagnostic = diagnostic.help(format!("did you mean `{suggestion}`?"));
                     }
-                    return Err(Flow::panic(diagnostic));
+                    return Err(Flow::fault(diagnostic));
                 }
             }
         }
@@ -872,10 +683,10 @@ impl Interp {
     pub fn field_of(&mut self, value: &Value, name: &str, span: Span) -> EvalResult {
         match member(value, name) {
             Some(value) => Ok(value),
-            None => Err(Flow::panic(
-                Diagnostic::error(format!("`{}` has no field `{name}`", value.type_name()))
+            None => Err(Flow::fault(
+                Fault::error(format!("`{}` has no field `{name}`", value.type_name()))
                     .with_code("unknown-field")
-                    .at(span, "unknown field")
+                    .at(loc_of(span), "unknown field")
                     .help(format!("available fields: {}", field_names(value))),
             )),
         }
@@ -891,16 +702,11 @@ impl Interp {
                 }
             }
         }
-        // Built-in methods live in a module named after the receiver's type.
-        let module = self.modules.get(&type_name)?;
-        module.exports.borrow().get(name).cloned()
+        korben_runtime::std::method_of(&type_name, name)
     }
 
+    /// Release a resource when a `with` scope exits, on every path.
     fn close_resource(&mut self, value: &Value, span: Span) {
-        if let Value::Resource(resource) = value {
-            resource.close();
-            return;
-        }
         if let Some(method) = self.find_method(value, "drop") {
             let _ = self.apply(method, vec![(None, value.clone())], span);
         }
@@ -1031,11 +837,13 @@ fn splice_parts(value: &Value, span: Span) -> Vec<Syntax> {
     match value {
         Value::Vector(items) => items.iter().map(|item| value_to_syntax(item, span)).collect(),
         Value::Nil => Vec::new(),
-        Value::Syntax(syntax) => match &syntax.datum {
-            Datum::List(items) | Datum::Vector(items) => items.clone(),
-            _ => vec![(**syntax).clone()],
+        other => match as_syntax(other) {
+            Some(syntax) => match &syntax.datum {
+                Datum::List(items) | Datum::Vector(items) => items.clone(),
+                _ => vec![(*syntax).clone()],
+            },
+            None => vec![value_to_syntax(other, span)],
         },
-        other => vec![value_to_syntax(other, span)],
     }
 }
 
@@ -1046,34 +854,13 @@ enum FieldTarget {
     Resolved(Value),
 }
 
-/// Look up `name` in a record, variant, or map, accepting keyword or string keys.
-fn member(value: &Value, name: &str) -> Option<Value> {
-    match value {
-        Value::Record(record) => record.get(name).cloned(),
-        Value::Variant(variant) => variant.get(name).cloned(),
-        Value::Map(map) => {
-            map.get(&Value::Keyword(Rc::from(name))).or_else(|| map.get(&Value::str(name))).cloned()
-        }
-        _ => None,
-    }
-}
-
-fn render_fields(fields: &[Sym]) -> String {
-    if fields.is_empty() {
-        return "none".to_string();
-    }
-    fields.iter().map(|field| field.to_string()).collect::<Vec<_>>().join(", ")
-}
-
 fn field_names(value: &Value) -> String {
     let names: Vec<String> = match value {
         Value::Record(record) => record.fields.iter().map(|(name, _)| name.to_string()).collect(),
         Value::Variant(variant) => {
             variant.fields.iter().map(|(name, _)| name.to_string()).collect()
         }
-        Value::Map(map) => {
-            map.entries.iter().map(|(key, _)| crate::value::Display(key).to_string()).collect()
-        }
+        Value::Map(map) => map.entries.iter().map(|(key, _)| display(key)).collect(),
         _ => Vec::new(),
     };
     if names.is_empty() {
@@ -1095,18 +882,6 @@ fn condition_matches(condition: &str, value: &Value) -> bool {
         Value::Record(record) => record.type_name.as_deref() == Some(condition),
         _ => false,
     }
-}
-
-/// Flatten keyword arguments back into positional form for native functions.
-fn flatten_args(args: Vec<(Option<String>, Value)>) -> Vec<Value> {
-    let mut out = Vec::with_capacity(args.len());
-    for (keyword, value) in args {
-        if let Some(keyword) = keyword {
-            out.push(Value::Keyword(Rc::from(keyword.as_str())));
-        }
-        out.push(value);
-    }
-    out
 }
 
 /// `'form` produces plain data, not a syntax object.
@@ -1141,8 +916,10 @@ pub fn quote_value(syntax: &Syntax) -> Value {
 /// Convert a runtime value back into syntax, for macro results.
 pub fn value_to_syntax(value: &Value, span: Span) -> Syntax {
     use korben_syntax::reader::Datum;
+    if let Some(syntax) = as_syntax(value) {
+        return (*syntax).clone();
+    }
     match value {
-        Value::Syntax(syntax) => (**syntax).clone(),
         Value::Nil => Syntax::new(Datum::Nil, span),
         Value::Bool(value) => Syntax::new(Datum::Bool(*value), span),
         Value::Int(value) => Syntax::new(Datum::Int(*value), span),

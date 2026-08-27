@@ -11,7 +11,7 @@
 use crate::ast::MacroDecl;
 use crate::eval::{value_to_syntax, Interp};
 use crate::lower::{self, fold_postfix};
-use crate::value::{Closure, Env, Flow, Value};
+use crate::value::{closure_value, span_of, syntax_value, Closure, Env, Flow, Value};
 use korben_syntax::diag::{Diagnostic, Diagnostics};
 use korben_syntax::reader::{Datum, Syntax};
 use korben_syntax::span::Span;
@@ -128,7 +128,7 @@ impl<'a> Expander<'a> {
             doc: decl.doc.clone(),
             span: decl.span,
         });
-        let function = Value::Closure(Rc::new(Closure {
+        let function = closure_value(Rc::new(Closure {
             decl: fn_decl,
             env: Env::root(),
             module: self.interp.current.name.clone(),
@@ -259,12 +259,12 @@ impl<'a> Expander<'a> {
 
         let mut args: Vec<(Option<String>, Value)> = arguments[..required]
             .iter()
-            .map(|item| (None, Value::Syntax(Rc::new(item.clone()))))
+            .map(|item| (None, syntax_value(Rc::new(item.clone()))))
             .collect();
         if decl.rest.is_some() {
             let rest: Vec<Value> = arguments[required..]
                 .iter()
-                .map(|item| Value::Syntax(Rc::new(item.clone())))
+                .map(|item| syntax_value(Rc::new(item.clone())))
                 .collect();
             args.push((None, Value::vector(rest)));
         }
@@ -275,24 +275,21 @@ impl<'a> Expander<'a> {
 
         let expanded = match result {
             Ok(value) => value_to_syntax(&value, form.span),
-            Err(Flow::Panic(diagnostic)) => {
-                let mut diagnostic = *diagnostic;
+            Err(Flow::Panic(fault)) => {
+                // The expansion chain is what makes a macro failure debuggable.
+                let mut diagnostic = crate::project::fault_diagnostic(*fault, form.span);
                 diagnostic.notes.push(format!("while expanding macro `{name}`"));
                 diagnostic
                     .secondary
                     .push(korben_syntax::diag::Label::new(decl.span, "macro defined here"));
-                if diagnostic.primary.is_none() {
-                    diagnostic.primary =
-                        Some(korben_syntax::diag::Label::new(form.span, "expanded here"));
-                }
                 self.diagnostics.push(diagnostic);
                 return Syntax::new(Datum::Nil, form.span);
             }
-            Err(Flow::Condition(value, span)) => {
+            Err(Flow::Condition(value, loc)) => {
                 self.diagnostics.push(
                     Diagnostic::error(format!("macro `{name}` raised a condition"))
                         .with_code("macro-condition")
-                        .at(span, format!("{value}"))
+                        .at(span_of(loc), format!("{value}"))
                         .secondary(form.span, "expanded here"),
                 );
                 return Syntax::new(Datum::Nil, form.span);

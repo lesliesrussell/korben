@@ -1,0 +1,8 @@
+[package]
+name = "korben-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The Korben runtime: values, operations, and the standard library, shared by the interpreter and generated native code"
+
+[dependencies]

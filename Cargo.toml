@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/korben-syntax",
+    "crates/korben-runtime",
     "crates/korben-core",
     "crates/korben-cli",
 ]
@@ -14,6 +15,7 @@ repository = "https://github.com/leslierussell/korben"
 
 [workspace.dependencies]
 korben-syntax = { path = "crates/korben-syntax" }
+korben-runtime = { path = "crates/korben-runtime" }
 korben-core = { path = "crates/korben-core" }
 
 [profile.release]

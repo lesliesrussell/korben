@@ -12,7 +12,7 @@ use crate::eval::{Interp, TypeInfo};
 use crate::expand::expand_module;
 use crate::lower::lower_module;
 use crate::manifest::Manifest;
-use crate::value::{Builtin, Closure, Env, Flow, ModuleRuntime, Sym, Value};
+use crate::value::{closure_value, span_of, Closure, Env, Flow, ModuleRuntime, Sym, Value};
 use korben_syntax::diag::{Diagnostic, Diagnostics};
 use korben_syntax::reader::{Comments, Datum, Syntax};
 use korben_syntax::span::Span;
@@ -265,16 +265,13 @@ impl Session {
                         decl.methods.iter().map(|method| method.name.clone()).collect();
                     for method in &methods {
                         self.interp.method_owner.insert(method.clone(), decl.name.clone());
-                        let dispatcher = Value::Builtin(Rc::new(Builtin::Method {
-                            protocol: Rc::from(decl.name.as_str()),
-                            name: Rc::from(method.as_str()),
-                        }));
+                        let dispatcher = Value::method(&decl.name, method);
                         define(runtime, method, dispatcher, decl.is_public);
                     }
                     self.interp.protocols.insert(decl.name.clone(), methods);
                 }
                 Item::Fn(decl) => {
-                    let value = Value::Closure(Rc::new(Closure {
+                    let value = closure_value(Rc::new(Closure {
                         decl: decl.clone(),
                         env: Env::root(),
                         module: runtime.name.clone(),
@@ -322,7 +319,7 @@ impl Session {
                 }
                 let mut methods = HashMap::new();
                 for method in &decl.methods {
-                    let value = Value::Closure(Rc::new(Closure {
+                    let value = closure_value(Rc::new(Closure {
                         decl: Rc::new(method.clone()),
                         env: Env::root(),
                         module: runtime.name.clone(),
@@ -376,11 +373,8 @@ impl Session {
                         is_enum: false,
                     }),
                 );
-                let ctor = Value::Builtin(Rc::new(Builtin::Ctor {
-                    type_name: type_name.clone(),
-                    variant: None,
-                    fields: names,
-                }));
+                let field_names: Vec<&str> = names.iter().map(|name| &**name).collect();
+                let ctor = Value::ctor(&decl.name, None, &field_names);
                 define(runtime, &decl.name, ctor, decl.is_public);
             }
             TypeBody::Enum(variants) => {
@@ -395,17 +389,10 @@ impl Session {
                     self.interp.variant_owner.insert(variant.name.clone(), decl.name.clone());
                     let value = if names.is_empty() {
                         // A payload-free variant is a value, so `None` needs no call.
-                        Value::Variant(Rc::new(crate::value::VariantValue {
-                            type_name: type_name.clone(),
-                            variant: Rc::from(variant.name.as_str()),
-                            fields: Vec::new(),
-                        }))
+                        Value::variant(&decl.name, &variant.name, Vec::new())
                     } else {
-                        Value::Builtin(Rc::new(Builtin::Ctor {
-                            type_name: type_name.clone(),
-                            variant: Some(Rc::from(variant.name.as_str())),
-                            fields: names,
-                        }))
+                        let field_names: Vec<&str> = names.iter().map(|name| &**name).collect();
+                        Value::ctor(&decl.name, Some(&variant.name), &field_names)
                     };
                     define(runtime, &variant.name, value, decl.is_public);
                 }
@@ -429,11 +416,8 @@ impl Session {
                         is_enum: false,
                     }),
                 );
-                let ctor = Value::Builtin(Rc::new(Builtin::Ctor {
-                    type_name,
-                    variant: None,
-                    fields: vec![Rc::from("value")],
-                }));
+                let ctor = Value::ctor(&decl.name, None, &["value"]);
+                let _ = &type_name;
                 define(runtime, &decl.name, ctor, decl.is_public);
             }
             TypeBody::Alias(_) => {
@@ -504,10 +488,10 @@ impl Session {
 /// Convert non-local control flow that escaped to the top into a diagnostic.
 pub fn flow_diagnostic(flow: Flow, span: Span) -> Diagnostic {
     match flow {
-        Flow::Panic(diagnostic) => *diagnostic,
-        Flow::Condition(value, span) => Diagnostic::error("unhandled condition")
+        Flow::Panic(fault) => fault_diagnostic(*fault, span),
+        Flow::Condition(value, loc) => Diagnostic::error("unhandled condition")
             .with_code("condition")
-            .at(span, format!("{value}"))
+            .at(span_of(loc), format!("{value}"))
             .help("wrap the call in `(try ... (catch ...))`"),
         Flow::Propagate(value) => Diagnostic::error("unhandled error propagated to the top level")
             .with_code("propagate")
@@ -516,6 +500,21 @@ pub fn flow_diagnostic(flow: Flow, span: Span) -> Diagnostic {
             .with_code("recur-scope")
             .at(span, "`recur` must appear in tail position of a `loop` or `fn`"),
     }
+}
+
+/// Render a runtime fault as a compiler diagnostic, so both execution modes
+/// report the same failure in the same shape.
+pub fn fault_diagnostic(fault: crate::value::Fault, fallback: Span) -> Diagnostic {
+    let span = if fault.loc.is_none() { fallback } else { span_of(fault.loc) };
+    let mut diagnostic =
+        Diagnostic::error(fault.message).with_code(fault.code).at(span, fault.label);
+    for note in fault.notes {
+        diagnostic = diagnostic.note(note);
+    }
+    for help in fault.help {
+        diagnostic = diagnostic.help(help);
+    }
+    diagnostic
 }
 
 fn define(runtime: &Rc<ModuleRuntime>, name: &str, value: Value, is_public: bool) {

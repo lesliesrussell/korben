@@ -10,7 +10,7 @@ pub mod docs;
 pub mod eval;
 pub mod expand;
 pub mod infer;
-pub mod json;
+pub mod ir;
 pub mod lower;
 pub mod manifest;
 pub mod project;

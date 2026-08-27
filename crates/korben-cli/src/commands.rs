@@ -94,7 +94,7 @@ fn print_help() {
     println!("  expand <file>                             show macro expansion");
     println!("  doc [--out <dir>]                         generate documentation");
     println!("  inspect                                   show the resolved project model");
-    println!("  build [--release]                         produce a runnable artifact\n");
+    println!("  build [--release] [--emit ir|rust]        produce a runnable artifact\n");
     println!("{}", ui::bold("OTHER"));
     println!("  version                                   print the toolchain version");
     println!("  help                                      print this message");
@@ -347,7 +347,7 @@ fn cmd_run(args: &[String]) -> ExitCode {
     };
 
     session.interp.current = runtime;
-    session.interp.program_args = flags.passthrough.clone();
+    korben_runtime::std::set_program_args(flags.passthrough.clone());
     match session.interp.apply(main, Vec::new(), Span::synthetic()) {
         Ok(value) => finish_main(&value),
         Err(flow) => {
@@ -365,7 +365,7 @@ fn finish_main(value: &Value) -> ExitCode {
             let payload = variant
                 .fields
                 .first()
-                .map(|(_, value)| korben_core::value::Display(value).to_string())
+                .map(|(_, value)| korben_core::value::display(value))
                 .unwrap_or_default();
             eprintln!("{} {payload}", ui::red("error:"));
             return ExitCode::FAILURE;
@@ -527,9 +527,7 @@ fn cmd_test(args: &[String]) -> ExitCode {
 /// Draw one sample from a generator: a function is called, a vector is indexed.
 fn sample_from(interp: &mut Interp, generator: Value, span: Span) -> Result<Value, Flow> {
     match generator {
-        Value::Closure(_) | Value::Native(_) | Value::Builtin(_) => {
-            interp.apply(generator, Vec::new(), span)
-        }
+        Value::Fn(_) => interp.apply(generator, Vec::new(), span),
         other => Ok(other),
     }
 }
@@ -727,6 +725,7 @@ fn cmd_doc(args: &[String]) -> ExitCode {
 fn cmd_build(args: &[String]) -> ExitCode {
     let flags = Flags::parse(args);
     let release = flags.has("release");
+    let emit = flags.value("emit").unwrap_or("").to_string();
     let mut session = match open_session(&flags) {
         Ok(session) => session,
         Err(code) => return code,
@@ -736,6 +735,25 @@ fn cmd_build(args: &[String]) -> ExitCode {
     if ui::report(&session.diagnostics, &session.sources, false) {
         eprintln!("{} {}", ui::red("build failed:"), ui::summarize(&session.diagnostics));
         return ExitCode::FAILURE;
+    }
+
+    // Lowering to core IR resolves every name, so it also catches references
+    // that the interpreter would only have failed on at run time.
+    let entry = session.manifest.main.clone();
+    let program = match korben_core::ir::lower_session(&session, &entry) {
+        Ok(program) => program,
+        Err(diagnostics) => {
+            for diagnostic in &diagnostics {
+                eprint!("{}", diagnostic.render(&session.sources, ui::use_color()));
+            }
+            eprintln!("{} {} error(s)", ui::red("build failed:"), diagnostics.len());
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if emit == "ir" {
+        print!("{}", korben_core::ir::render(&program));
+        return ExitCode::SUCCESS;
     }
 
     let profile = if release { "release" } else { "debug" };

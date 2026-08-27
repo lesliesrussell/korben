@@ -7,3 +7,4 @@ description = "Korben expander, type checker, evaluator, and standard library"
 
 [dependencies]
 korben-syntax.workspace = true
+korben-runtime.workspace = true
