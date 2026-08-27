@@ -1,0 +1,52 @@
+;;; Ownership, moves, and deterministic cleanup.
+;;;
+;;; Run it with `korben run examples/ownership.kb`. Every violation this file
+;;; describes in a comment is reported by `korben check`; the code here is the
+;;; version that passes.
+(module ownership
+  (use std.fs :as fs))
+
+; Implementing `Drop` is how a type says it owns something that must be
+; released. That makes it resource-bearing, so it moves rather than copying.
+(pub type Connection
+  {name: String})
+
+(impl Drop Connection
+  (fn drop [connection]
+    (println (format "closing {connection.name}"))))
+
+;;; Borrow a connection: reading it does not consume it, so the caller keeps it.
+(pub fn describe [connection: Borrow Connection] -> String
+  (format "connection to {connection.name}"))
+
+;;; Take ownership of a connection. After calling this the caller's binding is
+;;; gone, and using it again is a `use-after-move` error.
+(pub fn hand-over [connection: Connection] -> String !io
+  (let name connection.name)
+  (println (format "took ownership of {name}"))
+  name)
+
+;;; Read a file through a scoped resource. `with` releases the handle on every
+;;; exit path, including error propagation, so nothing leaks.
+(pub fn write-then-read [path: String] -> Result String IoError !io
+  (with file (fs.create path)? (file.write "written by korben\n")?)
+  (fs.read-text path))
+
+(pub fn main [] -> Unit !io
+  ; A borrow leaves the value usable afterwards.
+  (let connection (Connection {name "primary"}))
+  (println (describe connection))
+  (println (describe connection))
+
+  ; This move is the last use, which is what makes it legal.
+  (println (hand-over connection))
+
+  ; Writing `(describe connection)` here would report:
+  ; error[use-after-move]: `connection` was moved and cannot be used again
+
+  ; A scoped resource is closed when the `with` exits.
+  (with scoped (Connection {name "scoped"}) (println (describe scoped)))
+
+  (match (write-then-read "/tmp/korben-ownership.txt")
+    (Ok text) (println (format "read back: {text}"))
+    (Err error) (println "error:" error)))

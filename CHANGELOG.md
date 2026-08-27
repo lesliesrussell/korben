@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.3.0 — Ownership and borrowing
+
+`korben check` now reports ownership violations, closing the last part of v0.1
+acceptance criterion 9.
+
+### Added
+
+- **Ownership analysis** over specification section 12. Only resource-bearing
+  values move, so ordinary immutable data is never move-checked and ordinary
+  code sees no ownership diagnostics. A type owns a resource when it implements
+  `Drop`, is written `Owned T`, is a native handle, or contains one of those.
+- Flow-sensitive move checking. Branches are analyzed from a common state and
+  joined, so a value moved on one path is reported as *may have been moved*
+  rather than being missed or over-reported. Reported: `use-after-move`,
+  `maybe-moved`, `move-in-loop`, `clone-resource`, `exclusive-borrow`,
+  `borrow-across-task`, `borrow-escape`, and `unsafe-call`.
+- Every ownership diagnostic names the binding, points at both the move and the
+  use, explains the category and type, and suggests a fix.
+- Implicit borrows at call sites: a `T` satisfies a `Borrow T` parameter, per
+  specification 12.3. The reverse does not hold, which is what stops a borrow
+  escaping as owned data.
+- `Drop` is a compiler-known protocol; implementing it makes a type
+  resource-bearing and gives `with` something to call.
+- `std.fs/open` and `std.fs/create` return a real `File` resource, with
+  `write`, `read-text`, `close`, and `closed?`. `with` releases it on every exit
+  path, including error propagation.
+- `std.core/clone`, and a diagnostic when a resource is cloned.
+- `examples/ownership.kb`.
+
+### Changed
+
+- Protocol implementations are checked like any other function body.
+
 ## 0.2.0 — Native backend
 
 `korben build` now produces a standalone native executable.

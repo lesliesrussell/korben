@@ -190,6 +190,7 @@ pub const NAMES: &[&str] = &[
     // std.core: conversion and output
     "std.core/str",
     "std.core/type-of",
+    "std.core/clone",
     "std.core/identity",
     "std.core/println",
     "std.core/print",
@@ -229,6 +230,14 @@ pub const NAMES: &[&str] = &[
     "std.fs/exists?",
     "std.fs/read-lines",
     "std.fs/list-dir",
+    "std.fs/open",
+    "std.fs/create",
+    // File: a resource with deterministic cleanup.
+    "File/write",
+    "File/read-text",
+    "File/close",
+    "File/closed?",
+    "File/drop",
     // std.json
     "std.json/encode",
     "std.json/encode-pretty",
@@ -605,6 +614,9 @@ pub fn builtin(name: &str) -> Option<Value> {
         "std.core/type-of" => {
             native("type-of", 1, |_, args, _| Ok(Value::str(args[0].type_name())))
         }
+        // Collections are persistent, so a clone is a new handle on the same
+        // immutable structure. Cloning a resource is rejected at compile time.
+        "std.core/clone" => native("clone", 1, |_, args, _| Ok(args[0].clone())),
         "std.core/identity" => native("identity", 1, |_, args, _| Ok(args[0].clone())),
 
         "std.core/println" | "std.io/println" => native("println", 0, |caller, args, _| {
@@ -821,6 +833,56 @@ pub fn builtin(name: &str) -> Option<Value> {
             })
         }),
 
+        // A file handle is a resource: it owns an operating-system handle and
+        // must be closed exactly once, which is what `with` and `Drop` are for.
+        "std.fs/open" => native("open", 1, |_, args, loc| {
+            let path = as_string("fs.open", &args[0], loc)?;
+            Ok(match std::fs::File::open(&path) {
+                Ok(file) => Value::ok(file_value(file)),
+                Err(error) => Value::err(io_error(&path, &error)),
+            })
+        }),
+        "std.fs/create" => native("create", 1, |_, args, loc| {
+            let path = as_string("fs.create", &args[0], loc)?;
+            Ok(match std::fs::File::create(&path) {
+                Ok(file) => Value::ok(file_value(file)),
+                Err(error) => Value::err(io_error(&path, &error)),
+            })
+        }),
+        "File/write" => native("write", 2, |_, args, loc| {
+            let text = as_string("File.write", &args[1], loc)?;
+            with_file("File.write", &args[0], loc, |file| {
+                use std::io::Write;
+                file.write_all(text.as_bytes())
+            })
+        }),
+        "File/read-text" => native("read-text", 1, |_, args, loc| {
+            let mut text = String::new();
+            let outcome = with_file("File.read-text", &args[0], loc, |file| {
+                use std::io::Read;
+                file.read_to_string(&mut text).map(|_| ())
+            })?;
+            Ok(match outcome {
+                Value::Variant(variant) if &*variant.variant == "Ok" => Value::ok(Value::str(text)),
+                other => other,
+            })
+        }),
+        "File/close" | "File/drop" => native("close", 1, |_, args, loc| {
+            let Some(handle) = as_file(&args[0]) else {
+                return Err(wrong_type("File.close", "a File", &args[0], loc));
+            };
+            // Closing twice is not an error; `with` closes on every exit path.
+            *handle.borrow_mut() = None;
+            Ok(Value::Nil)
+        }),
+        "File/closed?" => native("closed?", 1, |_, args, loc| {
+            let Some(handle) = as_file(&args[0]) else {
+                return Err(wrong_type("File.closed?", "a File", &args[0], loc));
+            };
+            let closed = handle.borrow().is_none();
+            Ok(Value::Bool(closed))
+        }),
+
         "std.json/encode" => {
             native("encode", 1, |_, args, _| Ok(Value::str(crate::json::encode(&args[0], false))))
         }
@@ -906,9 +968,51 @@ pub fn method_of(type_name: &str, method: &str) -> Option<Value> {
     let module = match type_name {
         "String" => "std.string",
         "Cell" => "Cell",
+        "File" => "File",
         _ => return None,
     };
     builtin(&format!("{module}/{method}"))
+}
+
+/// Native types that own an external resource and must be released.
+pub const RESOURCE_TYPES: &[&str] = &["File"];
+
+type FileHandle = RefCell<Option<std::fs::File>>;
+
+fn file_value(file: std::fs::File) -> Value {
+    crate::value::Foreign::wrap("File", RefCell::new(Some(file)))
+}
+
+fn as_file(value: &Value) -> Option<&FileHandle> {
+    let Value::Foreign(foreign) = value else { return None };
+    foreign.downcast::<FileHandle>()
+}
+
+/// Run an operation on an open file, reporting use-after-close as an `Err`.
+fn with_file(
+    name: &str,
+    value: &Value,
+    loc: Loc,
+    work: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> Outcome {
+    let Some(handle) = as_file(value) else {
+        return Err(wrong_type(name, "a File", value, loc));
+    };
+    let mut borrowed = handle.borrow_mut();
+    let Some(file) = borrowed.as_mut() else {
+        return Ok(Value::err(Value::record(
+            Some("IoError"),
+            vec![
+                ("path", Value::str("")),
+                ("kind", Value::keyword("closed")),
+                ("message", Value::str(format!("{name} was called on a closed file"))),
+            ],
+        )));
+    };
+    Ok(match work(file) {
+        Ok(()) => Value::ok(Value::Nil),
+        Err(error) => Value::err(io_error("", &error)),
+    })
 }
 
 thread_local! {

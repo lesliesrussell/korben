@@ -30,6 +30,12 @@ pub fn check_session(session: &mut Session, strict_api: bool) {
         checker.check_module(module);
     }
     session.diagnostics.extend(checker.diagnostics);
+    // Ownership runs after inference so its diagnostics come second, and so a
+    // program with type errors is not also buried in ownership noise.
+    if !session.diagnostics.has_errors() {
+        let ownership = crate::own::check_session(session);
+        session.diagnostics.extend(ownership);
+    }
 }
 
 /// Infer the type of a single expression against the session's declarations.
@@ -334,7 +340,19 @@ impl Checker {
     }
 
     /// Unify and report a mismatch against `span`.
+    ///
+    /// A borrow is taken implicitly: specification 12.3 says the compiler
+    /// infers short lexical borrows in ordinary calls, so a `T` satisfies a
+    /// `Borrow T` parameter. The reverse is not true, which is what keeps a
+    /// borrow from escaping as owned data.
     fn expect(&mut self, expected: &Type, actual: &Type, span: Span, context: &str) {
+        if let Some(inner) = borrowed_type(&self.prune(expected)) {
+            let snapshot = self.subst.clone();
+            if self.unify(&inner, actual).is_ok() {
+                return;
+            }
+            self.subst = snapshot;
+        }
         if let Err((left, right)) = self.unify(expected, actual) {
             let expected = self.resolve(&left);
             let actual = self.resolve(&right);
@@ -1503,6 +1521,14 @@ fn substitute(ty: &Type, mapping: &HashMap<TypeVar, Type>) -> Type {
     }
 }
 
+/// The type behind `Borrow T` or `BorrowMut T`.
+fn borrowed_type(ty: &Type) -> Option<Type> {
+    match ty {
+        Type::Con(name, args) if matches!(&**name, "Borrow" | "BorrowMut") => args.first().cloned(),
+        _ => None,
+    }
+}
+
 fn is_numeric(name: &str) -> bool {
     matches!(
         name,
@@ -1525,11 +1551,56 @@ fn is_numeric(name: &str) -> bool {
 
 fn builtin_type_names() -> HashSet<String> {
     [
-        "Bool", "Char", "String", "Bytes", "Unit", "Never", "Symbol", "Keyword", "Int", "Int8",
-        "Int16", "Int32", "Int64", "Int128", "UInt", "UInt8", "UInt16", "UInt32", "UInt64",
-        "UInt128", "Float32", "Float64", "Option", "Result", "Vec", "Map", "Set", "Box", "Rc",
-        "Arc", "Weak", "Channel", "Task", "Stream", "Cell", "Uuid", "Date", "Duration", "Path",
-        "Syntax", "IoError", "Fn",
+        "Bool",
+        "Char",
+        "String",
+        "Bytes",
+        "Unit",
+        "Never",
+        "Symbol",
+        "Keyword",
+        "Int",
+        "Int8",
+        "Int16",
+        "Int32",
+        "Int64",
+        "Int128",
+        "UInt",
+        "UInt8",
+        "UInt16",
+        "UInt32",
+        "UInt64",
+        "UInt128",
+        "Float32",
+        "Float64",
+        "Option",
+        "Result",
+        "Vec",
+        "Map",
+        "Set",
+        "Box",
+        "Rc",
+        "Arc",
+        "Weak",
+        "Channel",
+        "Task",
+        "Stream",
+        "Cell",
+        "Uuid",
+        "Date",
+        "Duration",
+        "Path",
+        "Syntax",
+        "IoError",
+        "Fn",
+        "File",
+        // Ownership qualifiers from specification 12.1.
+        "Owned",
+        "Borrow",
+        "BorrowMut",
+        "Shared",
+        "Managed",
+        "Copy",
     ]
     .into_iter()
     .map(str::to_string)

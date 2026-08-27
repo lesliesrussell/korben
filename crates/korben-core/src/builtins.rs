@@ -18,9 +18,15 @@ pub fn install(interp: &mut Interp) {
         let runtime = interp.module(module);
         runtime.exports.borrow_mut().insert(member.to_string(), value);
     }
-    // `Cell` is addressed as a type name rather than a module path.
-    let cell = interp.module("Cell");
-    interp.modules.insert("Cell".to_string(), cell);
+    // `Cell` and `File` are addressed as type names rather than module paths.
+    for name in ["Cell", "File"] {
+        let module = interp.module(name);
+        interp.modules.insert(name.to_string(), module);
+    }
+    // `Drop` is a compiler-known protocol: implementing it makes a type
+    // resource-bearing, which is what the ownership analysis keys off.
+    interp.protocols.insert("Drop".to_string(), vec!["drop".to_string()]);
+    interp.method_owner.insert("drop".to_string(), "Drop".to_string());
 }
 
 /// The canonical runtime name for a member of a module, if it has one.

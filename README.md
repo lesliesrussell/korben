@@ -5,7 +5,8 @@ one-command modern developer experience.
 
 `spec.md` is the full language and platform specification. This repository is the
 Rust implementation of it. **This tree implements Milestone A ("Usable core"),
-the native backend from Milestone C, and parts of Milestone B.** See
+the native backend and ownership analysis from Milestone C, and parts of
+Milestone B.** See
 [Status](#status) for exactly what does and does not work yet.
 
 ```sh
@@ -106,6 +107,12 @@ specification's reference example adapted to what exists.
 - `Option` and `Result` with the postfix `?` propagation operator. No `null`.
 - Typed conditions with `try`/`catch`/`finally`, `throw`, deterministic cleanup
   through `with`, and `defer` in last-in-first-out order.
+- **Ownership and borrowing.** Only resource-bearing values move, so ordinary
+  code never sees an ownership diagnostic. A type owns a resource when it
+  implements `Drop`, is written `Owned T`, is a native handle such as `File`, or
+  contains one. Borrows are taken implicitly at call sites, as specification
+  12.3 requires, and `unsafe` functions may only be called from `unsafe` code.
+  `examples/ownership.kb` walks through it.
 - Protocols with explicit implementations and dispatch on the receiver.
 - Hygienic macros. Macros are functions from syntax objects to syntax objects,
   run at compile time; identifiers a template binds cannot capture a caller's.
@@ -117,10 +124,29 @@ specification's reference example adapted to what exists.
   `!unsafe`), and `--strict-api` for complete public signatures.
 - Standard library: `std.core`, `std.string`, `std.math`, `std.io`, `std.fs`,
   `std.json`, `std.log`, `std.time`, `std.process`, `std.test`, `std.syntax`.
+  `fs.open` and `fs.create` return a `File`, a real resource that `with` closes
+  on every exit path.
 
 Inference is deliberately conservative. Where the checker cannot reach a sound
 conclusion it produces an unconstrained type rather than a guess, so a reported
-error is a real one.
+error is a real one. Ownership follows the same principle from the other end:
+it says nothing at all about values that cannot leak.
+
+```
+error[use-after-move]: `file` was moved and cannot be used again
+  --> src/main.kb:10:12
+   |
+10 |   (consume file))
+   |            ^^^^ used after the move
+   |
+  ... src/main.kb:9:12
+   |
+ 9 |   (consume file)
+   |            ---- moved here
+   |
+  note: an owned resource is released exactly once, so moving it transfers responsibility
+  help: pass it by `Borrow`, or restructure so the value is used before it moves
+```
 
 ## Status
 
@@ -130,6 +156,7 @@ Implemented:
 - Type, effect, and exhaustiveness analysis.
 - A direct interpreter over the typed AST.
 - Core IR, and a native backend that produces standalone executables.
+- Ownership, move, and borrow analysis with `Drop`-based resource types.
 - Canonical formatter, linter, documentation generator, project-aware REPL.
 - `new`, `init`, `run`, `dev`, `check`, `test`, `fmt`, `lint`, `repl`, `expand`,
   `doc`, `inspect`, `doctor`, `build`.
@@ -139,9 +166,13 @@ Not yet implemented, and reported as such rather than stubbed silently:
 - **Async runtime and structured concurrency** (Milestone D). `async`, `await`,
   and `task-scope` parse and type-check, and run eagerly on the calling task.
   Channels, task scopes, and cancellation are not implemented.
-- **Ownership and borrow analysis** (Milestone C). `Owned`, `Borrow`,
-  `BorrowMut`, `Shared`, and `Managed` are not enforced yet; `unsafe` is
-  lexically tracked and surfaced by the linter and documentation.
+- **Lifetime inference.** Ownership tracks moves flow-sensitively and reports
+  use-after-move, possible moves across branches, moves inside a loop, cloning a
+  resource, exclusive-borrow aliasing, borrows crossing a task boundary, and
+  escapes from a `with` scope. What it does not do is follow a borrow's owner
+  across a function boundary, so returning a borrow is checked by types alone.
+- **`Shared` and `Managed`.** Both are recognized as ownership categories, but
+  neither has a runtime representation yet, so there is no way to construct one.
 - **FFI** (Milestone C). `korben ffi` reports the milestone it lands in.
 - **Package management** (Milestone D). Manifests parse dependencies and the
   lockfile format is specified, but `add`, `remove`, `update`, `publish`,
@@ -184,8 +215,9 @@ native builds reproducible and offline.
 ## Development
 
 ```sh
-cargo test              # 107 tests: reader, formatter, evaluator, checker,
-                        # CLI, and interpreter-vs-native differential tests
+cargo test              # 124 tests: reader, formatter, evaluator, checker,
+                        # ownership, CLI, and interpreter-vs-native
+                        # differential tests
 cargo clippy --workspace --all-targets
 cargo fmt
 ```
