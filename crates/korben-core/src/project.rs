@@ -185,9 +185,28 @@ impl Session {
             self.diagnostics.push(error);
         }
 
-        // The declared module name wins over the file path.
-        let declared = declared_module_name(&forms).unwrap_or(default_name);
-        let name = module_name.unwrap_or(declared);
+        // A module declaration must agree with where the file lives, so that
+        // module paths resolve deterministically.
+        let declared = declared_module_name(&forms);
+        let name = match (&module_name, &declared) {
+            (Some(expected), Some(declared)) if expected != declared => {
+                let span = forms
+                    .iter()
+                    .find(|form| form.head_symbol() == Some("module"))
+                    .map(|form| form.span)
+                    .unwrap_or(Span::new(file, 0, 0));
+                self.diagnostics.push(
+                    Diagnostic::error(format!(
+                        "module is declared as `{declared}` but resolves as `{expected}`"
+                    ))
+                    .with_code("module-name-mismatch")
+                    .at(span, format!("expected `(module {expected} ...)`"))
+                    .help("a module's name must match its path under `src/`"),
+                );
+                expected.clone()
+            }
+            _ => module_name.clone().unwrap_or_else(|| declared.clone().unwrap_or(default_name)),
+        };
 
         self.loading.push(name.clone());
         // Imports are resolved before expansion so imported macros are visible.

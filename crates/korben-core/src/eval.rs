@@ -9,9 +9,9 @@
 
 use crate::ast::*;
 use crate::value::{
-    apply, as_closure, as_syntax, bind_args, closure_value, display, loc_of, member, member_names,
-    span_of, syntax_value, Arg as RtArg, Assign, Caller, Closure, Env, EvalResult, Fault, Flow,
-    Loc, MapValue, ModuleRuntime, Param as RtParam, RecordValue, Value,
+    apply, as_closure, as_syntax, bind_args, closure_value, display, loc_of, member, span_of,
+    syntax_value, Arg as RtArg, Assign, Caller, Closure, Env, EvalResult, Fault, Flow, Loc,
+    MapValue, ModuleRuntime, Param as RtParam, RecordValue, Value,
 };
 use korben_syntax::span::Span;
 use korben_syntax::Syntax;
@@ -274,14 +274,11 @@ impl Interp {
                 Ok(Value::vector(values))
             }
             Expr::Set(items, _) => {
-                let mut values: Vec<Value> = Vec::with_capacity(items.len());
+                let mut values = Vec::with_capacity(items.len());
                 for item in items {
-                    let value = self.eval(item, env)?;
-                    if !values.iter().any(|existing| existing.eq_value(&value)) {
-                        values.push(value);
-                    }
+                    values.push(self.eval(item, env)?);
                 }
-                Ok(Value::Set(Rc::new(values)))
+                Ok(Value::set(values))
             }
             Expr::Map(entries, _) => {
                 let mut map = MapValue::default();
@@ -311,6 +308,26 @@ impl Interp {
                         None => Ok(Value::Nil),
                     }
                 }
+            }
+            Expr::And(operands, _) => {
+                let mut result = Value::Bool(true);
+                for operand in operands {
+                    result = self.eval(operand, env)?;
+                    if !result.is_truthy() {
+                        break;
+                    }
+                }
+                Ok(result)
+            }
+            Expr::Or(operands, _) => {
+                let mut result = Value::Bool(false);
+                for operand in operands {
+                    result = self.eval(operand, env)?;
+                    if result.is_truthy() {
+                        break;
+                    }
+                }
+                Ok(result)
             }
             Expr::Do(body, _) => self.eval_body(body, env),
             Expr::Lambda(decl, _) => Ok(closure_value(Rc::new(Closure {
@@ -530,26 +547,15 @@ impl Interp {
                     return apply(self, &value, arguments, loc_of(span));
                 }
                 FieldTarget::Value(receiver) => {
-                    let mut arguments = self.eval_args(args, env)?;
-                    // A field holding a function is called directly.
-                    if let Some(field) = member(&receiver, name) {
-                        if matches!(field, Value::Fn(_)) {
-                            return apply(self, &field, arguments, loc_of(span));
-                        }
-                        if arguments.is_empty() {
-                            return Ok(field);
-                        }
-                    }
-                    if let Some(method) = self.find_method(&receiver, name) {
-                        arguments.insert(0, RtArg::positional(receiver));
-                        return apply(self, &method, arguments, loc_of(span));
-                    }
-                    return Err(Flow::fault(
-                        Fault::error(format!("`{}` has no member `{name}`", receiver.type_name()))
-                            .with_code("unknown-member")
-                            .at(loc_of(*field_span), "unknown field or method")
-                            .help(format!("available fields: {}", member_names(&receiver))),
-                    ));
+                    let arguments = self.eval_args(args, env)?;
+                    let _ = field_span;
+                    return korben_runtime::apply::call_member(
+                        self,
+                        &receiver,
+                        name,
+                        arguments,
+                        loc_of(span),
+                    );
                 }
             }
         }

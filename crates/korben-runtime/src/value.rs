@@ -220,8 +220,16 @@ impl Value {
         Value::Vector(Rc::new(items))
     }
 
+    /// Sets keep insertion order and drop duplicates, which is what the
+    /// reader and the evaluator both produce.
     pub fn set(items: Vec<Value>) -> Value {
-        Value::Set(Rc::new(items))
+        let mut unique: Vec<Value> = Vec::with_capacity(items.len());
+        for item in items {
+            if !unique.iter().any(|existing| existing.eq_value(&item)) {
+                unique.push(item);
+            }
+        }
+        Value::Set(Rc::new(unique))
     }
 
     pub fn map(entries: Vec<(Value, Value)>) -> Value {

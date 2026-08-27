@@ -776,7 +776,8 @@ impl<'a> Lowerer<'a> {
                 );
                 continue;
             }
-            if let Some(decl) = self.fn_decl(method_form, parts, false, true, false, None) {
+            // A method's public surface is the protocol's, not its own.
+            if let Some(decl) = self.fn_decl(method_form, parts, false, false, false, None) {
                 methods.push(decl);
             }
         }
@@ -1186,6 +1187,10 @@ impl<'a> Lowerer<'a> {
                 Some(Expr::If { cond: Box::new(cond), then: Box::new(then), els, span })
             }
             "do" => Some(Expr::Do(Box::new(self.body(&items[1..], span)), span)),
+            // `and` and `or` short-circuit on truthiness and may yield operands
+            // of different types, which no macro expanding to `if` can express.
+            "and" => Some(Expr::And(items[1..].iter().map(|item| self.expr(item)).collect(), span)),
+            "or" => Some(Expr::Or(items[1..].iter().map(|item| self.expr(item)).collect(), span)),
             "fn" | "async-fn" => {
                 let is_async = head == "async-fn";
                 // Anonymous when the first form is a parameter vector.
@@ -1489,8 +1494,19 @@ impl<'a> Lowerer<'a> {
         let mut literal = String::new();
         let mut chars = template.char_indices().peekable();
         while let Some((offset, ch)) = chars.next() {
+            // `{{` and `}}` are literal braces, as in a Rust format string.
+            if ch == '}' && chars.peek().map(|(_, next)| *next) == Some('}') {
+                chars.next();
+                literal.push('}');
+                continue;
+            }
             if ch != '{' {
                 literal.push(ch);
+                continue;
+            }
+            if chars.peek().map(|(_, next)| *next) == Some('{') {
+                chars.next();
+                literal.push('{');
                 continue;
             }
             let mut depth = 1usize;

@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.2.0 — Native backend
+
+`korben build` now produces a standalone native executable.
+
+### Added
+
+- **Core IR** with full name resolution, printed by `korben build --emit ir`.
+  Every reference is classified as a local, a module global, a constructor, a
+  protocol method, or a runtime builtin.
+- **`korben-runtime`**: the value representation, call dispatch, argument
+  binding, construction, protocol dispatch, JSON, and the standard library. The
+  interpreter and generated code both use it, so the two execution modes share
+  observable semantics by construction.
+- **Native code generation**: typed core IR lowered to Rust and compiled by an
+  isolated cargo pipeline, per specification 18.3. `korben build --emit rust`
+  prints the generated source. A release binary of the language tour is 587 KB.
+- **Differential tests** that compile a corpus both ways and require
+  byte-identical output, runtime fault reports included.
+- Native binaries embed a source table, so a runtime fault reports against the
+  Korben source that caused it.
+
+### Changed
+
+- `and` and `or` are core forms rather than prelude macros. Their result may be
+  any of their operands' types, which an expansion into `if` cannot express.
+- `korben run` type-checks before running, so both execution modes accept the
+  same programs.
+- `--strict-api` is its own flag; `--release` no longer implies it.
+- A heterogeneous vector literal infers as a tuple, per specification 9.5.
+- A module declaration that disagrees with its path is now an error.
+- Map literals widen instead of rejecting heterogeneous entries.
+- `korben build` emits a native executable instead of a `.kbx` bundle.
+
+### Fixed
+
+- Comparison and arithmetic accept the chains they always evaluated: `(< 1 2 3)`
+  and `(+ 1 2 3)` no longer fail the arity check.
+- `{{` and `}}` are literal braces in an interpolated string.
+- Protocol implementations are no longer treated as public API by
+  `--strict-api`.
+
 ## 0.1.0 — Milestone A
 
 First implementation of the Korben specification: a usable core plus the

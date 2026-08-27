@@ -386,41 +386,38 @@ impl Checker {
             self.globals.insert(name.to_string(), scheme);
         };
         let number = Type::con("Int");
-        for name in ["+", "-", "*", "/", "mod"] {
+        // Arithmetic folds over any number of operands.
+        for name in ["+", "-", "*", "/"] {
             define(
                 name,
-                Scheme::mono(Type::function(
+                Scheme::mono(Type::variadic(
                     vec![number.clone(), number.clone()],
                     number.clone(),
                     Effects::NONE,
                 )),
             );
         }
+        define(
+            "mod",
+            Scheme::mono(Type::function(
+                vec![number.clone(), number.clone()],
+                number.clone(),
+                Effects::NONE,
+            )),
+        );
         for name in ["inc", "dec"] {
             define(
                 name,
                 Scheme::mono(Type::function(vec![number.clone()], number.clone(), Effects::NONE)),
             );
         }
-        for name in ["<", "<=", ">", ">="] {
+        // Comparison chains: `(< 1 2 3)` reads as `1 < 2 < 3`.
+        for name in ["<", "<=", ">", ">=", "=", "not="] {
             define(
                 name,
                 Scheme {
                     vars: vec![0],
-                    ty: Type::function(
-                        vec![Type::Var(0), Type::Var(0)],
-                        Type::bool(),
-                        Effects::NONE,
-                    ),
-                },
-            );
-        }
-        for name in ["=", "not="] {
-            define(
-                name,
-                Scheme {
-                    vars: vec![0],
-                    ty: Type::function(
+                    ty: Type::variadic(
                         vec![Type::Var(0), Type::Var(0)],
                         Type::bool(),
                         Effects::NONE,
@@ -931,12 +928,18 @@ impl Checker {
             // Cross-module references are checked by the module system, not here.
             Expr::Path { .. } => Type::Unknown,
             Expr::Vector(items, _) => {
+                // A literal whose elements agree is a `Vec`; one whose elements
+                // differ is a fixed-length tuple, per specification 9.5.
+                let types: Vec<Type> = items.iter().map(|item| self.infer(item, scope)).collect();
                 let element = self.fresh();
-                for item in items {
-                    let actual = self.infer(item, scope);
-                    self.expect(&element, &actual, item.span(), "in a vector literal");
+                let snapshot = self.subst.clone();
+                let uniform = types.iter().all(|actual| self.unify(&element, actual).is_ok());
+                if uniform {
+                    Type::vec(element)
+                } else {
+                    self.subst = snapshot;
+                    Type::Tuple(types)
                 }
-                Type::vec(element)
             }
             Expr::Set(items, _) => {
                 let element = self.fresh();
@@ -947,15 +950,15 @@ impl Checker {
                 Type::app("Set", vec![element])
             }
             Expr::Map(entries, _) => {
-                let key = self.fresh();
-                let value = self.fresh();
+                // Map literals are commonly heterogeneous, so a mismatch widens
+                // the entry type rather than being reported as an error.
+                let mut keys = Vec::new();
+                let mut values = Vec::new();
                 for (key_expr, value_expr) in entries {
-                    let actual_key = self.infer(key_expr, scope);
-                    self.expect(&key, &actual_key, key_expr.span(), "in a map key");
-                    let actual_value = self.infer(value_expr, scope);
-                    self.expect(&value, &actual_value, value_expr.span(), "in a map value");
+                    keys.push(self.infer(key_expr, scope));
+                    values.push(self.infer(value_expr, scope));
                 }
-                Type::app("Map", vec![key, value])
+                Type::app("Map", vec![self.join(keys), self.join(values)])
             }
             Expr::Record { type_name, fields, .. } => {
                 let mut table = BTreeMap::new();
@@ -987,6 +990,12 @@ impl Checker {
                     // A one-armed `if` yields Unit because it may not run.
                     None => Type::unit(),
                 }
+            }
+            // Truthiness combinators may yield operands of different types.
+            Expr::And(operands, _) | Expr::Or(operands, _) => {
+                let types: Vec<Type> =
+                    operands.iter().map(|operand| self.infer(operand, scope)).collect();
+                self.join(types)
             }
             Expr::Do(body, _) => self.infer_body(body, scope),
             Expr::Lambda(decl, _) => {
@@ -1303,6 +1312,17 @@ impl Checker {
         Type::Unknown
     }
 
+    /// The common type of a group, or `Unknown` when they do not agree.
+    fn join(&mut self, types: Vec<Type>) -> Type {
+        let common = self.fresh();
+        let snapshot = self.subst.clone();
+        if types.iter().all(|actual| self.unify(&common, actual).is_ok()) {
+            return common;
+        }
+        self.subst = snapshot;
+        Type::Unknown
+    }
+
     fn instantiate(&mut self, scheme: &Scheme) -> Type {
         if scheme.vars.is_empty() {
             return scheme.ty.clone();
@@ -1583,6 +1603,11 @@ fn collect_used(expr: &Expr, out: &mut HashSet<String>) {
                 if let InterpPart::Expr(expr) = part {
                     collect_used(expr, out);
                 }
+            }
+        }
+        Expr::And(items, _) | Expr::Or(items, _) => {
+            for item in items {
+                collect_used(item, out);
             }
         }
         Expr::Vector(items, _) | Expr::Set(items, _) | Expr::Recur(items, _) => {

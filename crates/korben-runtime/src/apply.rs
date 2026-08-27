@@ -8,6 +8,7 @@
 
 use crate::loc::{Fault, Loc};
 use crate::value::{Arg, Body, Caller, Flow, Function, Outcome, Param, Value};
+
 use std::rc::Rc;
 
 /// Invoke a value.
@@ -282,4 +283,172 @@ fn render_fields(fields: &[crate::value::Sym]) -> String {
         return "none".to_string();
     }
     fields.iter().map(|field| field.to_string()).collect::<Vec<_>>().join(", ")
+}
+
+// ------------------------------------------------------- pattern primitives
+
+/// True when `value` is the named enum variant.
+pub fn is_variant(value: &Value, name: &str) -> bool {
+    matches!(value, Value::Variant(variant) if &*variant.variant == name)
+}
+
+/// The nth payload field of a variant.
+pub fn variant_at(value: &Value, index: usize) -> Option<Value> {
+    let Value::Variant(variant) = value else { return None };
+    variant.fields.get(index).map(|(_, value)| value.clone())
+}
+
+/// True when `value` is a vector of the required shape.
+pub fn vector_shape(value: &Value, count: usize, has_rest: bool) -> bool {
+    let Value::Vector(items) = value else { return false };
+    if has_rest {
+        items.len() >= count
+    } else {
+        items.len() == count
+    }
+}
+
+pub fn vector_at(value: &Value, index: usize) -> Option<Value> {
+    let Value::Vector(items) = value else { return None };
+    items.get(index).cloned()
+}
+
+/// The tail of a vector, for a `[head ...tail]` rest pattern.
+pub fn vector_from(value: &Value, index: usize) -> Value {
+    match value {
+        Value::Vector(items) if items.len() >= index => Value::vector(items[index..].to_vec()),
+        _ => Value::vector(Vec::new()),
+    }
+}
+
+/// Unwrap `Ok`/`Some` for the postfix `?` operator, propagating `Err`/`None`.
+pub fn propagate(value: Value, loc: Loc) -> Outcome {
+    match &value {
+        Value::Variant(variant) => match &*variant.variant {
+            "Ok" | "Some" => {
+                Ok(variant.fields.first().map(|(_, value)| value.clone()).unwrap_or(Value::Nil))
+            }
+            "Err" | "None" => Err(Flow::Propagate(value.clone())),
+            other => Err(Flow::fault(
+                Fault::new("propagate-type", format!("`?` cannot propagate `{other}`"), loc)
+                    .label("expected a Result or an Option")
+                    .help("`?` works on Ok/Err and Some/None"),
+            )),
+        },
+        other => Err(Flow::fault(
+            Fault::new("propagate-type", "`?` needs a Result or an Option", loc)
+                .label(format!("found {}", other.type_name())),
+        )),
+    }
+}
+
+/// Whether a thrown value matches a `catch` clause.
+pub fn condition_matches(condition: &str, value: &Value) -> bool {
+    if condition == "_" || condition == "Condition" {
+        return true;
+    }
+    if value.type_name() == condition {
+        return true;
+    }
+    match value {
+        Value::Variant(variant) => &*variant.variant == condition,
+        Value::Record(record) => record.type_name.as_deref() == Some(condition),
+        _ => false,
+    }
+}
+
+/// Read a member, reporting a fault when the value has no such field.
+pub fn field(value: &Value, name: &str, loc: Loc) -> Outcome {
+    match crate::value::member(value, name) {
+        Some(found) => Ok(found),
+        None => Err(Flow::fault(
+            Fault::new(
+                "unknown-field",
+                format!("`{}` has no field `{name}`", value.type_name()),
+                loc,
+            )
+            .label("unknown field")
+            .help(format!("available fields: {}", crate::value::member_names(value))),
+        )),
+    }
+}
+
+/// The fault reported when no `match` arm applies.
+pub fn no_match(value: &Value, loc: Loc) -> Flow {
+    Flow::fault(
+        Fault::new("match-failure", "no match arm applied", loc)
+            .label(format!("`{value}` matched none of the arms"))
+            .help("add a `_` arm or handle the missing case"),
+    )
+}
+
+/// The fault reported when a `let` pattern does not match its value.
+pub fn bad_binding(value: &Value, loc: Loc) -> Flow {
+    Flow::fault(
+        Fault::new("let-pattern", "binding pattern did not match", loc)
+            .label(format!("value `{value}` does not match this pattern"))
+            .help("use `match` when a binding can fail"),
+    )
+}
+
+/// Release a resource when a `with` scope exits, on every path.
+pub fn close_resource(caller: &mut dyn Caller, value: &Value, loc: Loc) {
+    if let Some(method) = caller.find_method(value, "drop") {
+        let _ = apply(caller, &method, vec![Arg::positional(value.clone())], loc);
+    }
+}
+
+/// Report control flow that escaped to the top of a program.
+pub fn report(flow: Flow) -> String {
+    match flow {
+        Flow::Panic(fault) => fault.render(),
+        Flow::Condition(value, loc) => Fault::new("condition", "unhandled condition", loc)
+            .label(format!("{value}"))
+            .help("wrap the call in `(try ... (catch ...))`")
+            .render(),
+        Flow::Propagate(value) => {
+            Fault::new("propagate", "unhandled error propagated to the top level", Loc::NONE)
+                .label(format!("{value}"))
+                .render()
+        }
+        Flow::Recur(_) => {
+            Fault::new("recur-scope", "`recur` outside a loop or function", Loc::NONE).render()
+        }
+    }
+}
+
+/// Call a member of a value: `(receiver.name args...)`.
+///
+/// A field holding a function is called directly; otherwise the name is looked
+/// up as a method on the receiver's type. Reading a field with no arguments is
+/// what makes `(user.name)` mean the field rather than a call.
+pub fn call_member(
+    caller: &mut dyn Caller,
+    receiver: &Value,
+    name: &str,
+    args: Vec<Arg>,
+    loc: Loc,
+) -> Outcome {
+    if let Some(found) = crate::value::member(receiver, name) {
+        if matches!(found, Value::Fn(_)) {
+            return apply(caller, &found, args, loc);
+        }
+        if args.is_empty() {
+            return Ok(found);
+        }
+    }
+    if let Some(method) = caller.find_method(receiver, name) {
+        let mut args = args;
+        args.insert(0, Arg::positional(receiver.clone()));
+        return apply(caller, &method, args, loc);
+    }
+    Err(Flow::fault(
+        Fault::new(
+            "unknown-member",
+            format!("`{}` has no member `{name}`", receiver.type_name()),
+            loc,
+        )
+        .label("unknown field or method")
+        .help(format!("available fields: {}", crate::value::member_names(receiver))),
+    ))
 }

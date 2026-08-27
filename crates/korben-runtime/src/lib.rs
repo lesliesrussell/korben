@@ -15,6 +15,7 @@ pub mod value;
 
 pub use apply::{apply, bind_args, construct};
 pub use loc::{Fault, Loc};
+pub use value::display;
 pub use value::{
     Arg, Body, Caller, Flow, Foreign, Function, MapValue, Outcome, Param, RecordValue, Sym, Value,
     VariantValue,

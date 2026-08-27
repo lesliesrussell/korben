@@ -30,8 +30,17 @@ fn return_type_mismatches_are_reported() {
 }
 
 #[test]
-fn vector_elements_must_agree() {
-    assert_eq!(check("(fn f [] [1 \"two\"])"), vec!["type-mismatch"]);
+fn a_uniform_vector_literal_is_a_vec() {
+    assert!(check("(fn f [] -> Vec Int [1 2 3])").is_empty());
+    assert_eq!(check("(fn f [] -> Vec Int [1 2 \"three\"])"), vec!["type-mismatch"]);
+}
+
+#[test]
+fn a_mixed_vector_literal_is_a_tuple() {
+    // Specification 9.5: the language distinguishes fixed-length heterogeneous
+    // tuples from homogeneous vectors by inferred context.
+    assert!(check("(fn f [] [1 \"two\" true])").is_empty());
+    assert!(check("(fn f [] -> [Int String] [1 \"two\"])").is_empty());
 }
 
 #[test]

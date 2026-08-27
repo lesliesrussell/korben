@@ -4,8 +4,8 @@ A compiled, statically typed, ownership-safe Lisp for native software, with a
 one-command modern developer experience.
 
 `spec.md` is the full language and platform specification. This repository is the
-Rust implementation of it. **This tree implements Milestone A ("Usable core") of
-the roadmap in specification section 27, plus parts of Milestone B.** See
+Rust implementation of it. **This tree implements Milestone A ("Usable core"),
+the native backend from Milestone C, and parts of Milestone B.** See
 [Status](#status) for exactly what does and does not work yet.
 
 ```sh
@@ -35,7 +35,7 @@ One executable covers the standard workflow. Every command works on a project
 | `korben doc [--out <dir>]` | Markdown docs plus a machine-readable `api.json` |
 | `korben inspect` | The resolved project model |
 | `korben doctor` | Toolchain and project health |
-| `korben build [--release]` | Produce a runnable artifact |
+| `korben build [--release] [--emit ir\|rust]` | Compile to a native executable |
 
 Diagnostics carry a concise explanation, source spans, expected-versus-found
 types in source-level names, and confidence-safe suggestions. `--json` emits the
@@ -52,6 +52,37 @@ error[type-mismatch]: type mismatch in an argument
   note:    found: String
 ```
 
+## Two execution modes
+
+Korben runs the same program two ways, and the specification requires them to
+have identical observable semantics.
+
+```sh
+korben run                  # development mode: direct interpretation
+korben build --release      # native mode: a standalone executable
+```
+
+Both link the same `korben-runtime` crate — one value representation, one call
+dispatch, one standard library — so they agree by construction rather than by
+convention. A differential test suite compiles a corpus covering records, enums,
+guards, protocols, macros, `?`, `loop`/`recur`, named arguments, cells, JSON,
+`try`/`catch`/`finally`, and `defer` both ways and requires byte-identical
+output, runtime fault reports included.
+
+The native backend lowers typed core IR to Rust and hands it to an isolated
+cargo build, the bootstrapping strategy specification section 18.3 describes.
+Both stages are inspectable:
+
+```sh
+korben build --emit ir      # the name-resolved core IR
+korben build --emit rust    # the generated Rust
+```
+
+A release binary of the language tour is 587 KB and starts in about 7 ms.
+Values are still dynamically typed at run time, so compute-bound code is only
+about twice the interpreter's speed; using the inferred types to unbox is the
+next optimization, not a redesign.
+
 ## The language today
 
 `examples/tour.kb` exercises everything below; `examples/greeting.kb` is the
@@ -65,6 +96,9 @@ specification's reference example adapted to what exists.
 - Functions with optional annotations, named arguments with defaults, closures,
   `#(.field %)` shorthand, and guaranteed tail calls through `loop`/`recur` and
   self-recursion.
+- `and` and `or` short-circuit on truthiness. They are core forms rather than
+  macros because their result may be any of their operands' types, which no
+  expansion into `if` can express in a typed language.
 - Records, enums, newtypes, tuples, vectors, maps, and sets. Collections are
   immutable; `var` and `Cell` make mutation explicit.
 - Pattern matching over literals, constructors, vectors with rest patterns,
@@ -78,9 +112,9 @@ specification's reference example adapted to what exists.
   The prelude (`when`, `unless`, `and`, `or`, `cond`, `if-let`, `when-let`) is
   written in Korben, so `korben expand` shows exactly what your code becomes.
 - Hindley–Milner type inference with let-polymorphism, structural records that
-  unify with the nominal types they match, effect inference (`!io`, `!async`,
-  `!alloc`, `!ffi`, `!unsafe`), and `--strict-api` for complete public
-  signatures.
+  unify with the nominal types they match, tuple inference for heterogeneous
+  vector literals, effect inference (`!io`, `!async`, `!alloc`, `!ffi`,
+  `!unsafe`), and `--strict-api` for complete public signatures.
 - Standard library: `std.core`, `std.string`, `std.math`, `std.io`, `std.fs`,
   `std.json`, `std.log`, `std.time`, `std.process`, `std.test`, `std.syntax`.
 
@@ -90,22 +124,18 @@ error is a real one.
 
 ## Status
 
-Implemented (Milestone A, and the parts of B that do not need a package
-registry):
+Implemented:
 
 - Reader, spans, module resolver, hygienic macro expansion.
 - Type, effect, and exhaustiveness analysis.
 - A direct interpreter over the typed AST.
+- Core IR, and a native backend that produces standalone executables.
 - Canonical formatter, linter, documentation generator, project-aware REPL.
 - `new`, `init`, `run`, `dev`, `check`, `test`, `fmt`, `lint`, `repl`, `expand`,
   `doc`, `inspect`, `doctor`, `build`.
 
 Not yet implemented, and reported as such rather than stubbed silently:
 
-- **Native code generation** (Milestone C). `korben build` emits a `.kbx`
-  bundle — every module of the program in one reproducible file — plus a
-  launcher script. The bundle runs on the Korben runtime; it is not yet a
-  standalone native binary.
 - **Async runtime and structured concurrency** (Milestone D). `async`, `await`,
   and `task-scope` parse and type-check, and run eagerly on the calling task.
   Channels, task scopes, and cancellation are not implemented.
@@ -121,6 +151,13 @@ Not yet implemented, and reported as such rather than stubbed silently:
 - **Restart-case conditions.** Typed conditions and handlers work; named restart
   points do not.
 
+Two sharp edges worth knowing:
+
+- Building natively needs `cargo` on `PATH`, because the backend compiles
+  generated Rust. `korben run` needs nothing.
+- A string literal inside a `{...}` interpolation hole must be escaped:
+  `(format "{(str \"a\" \"b\")}")`. Write `{{` and `}}` for literal braces.
+
 The interpreter bounds recursion with `Interp::max_depth` and reports exceeding
 it as a diagnostic rather than aborting. The executable runs on a large worker
 stack so ordinary recursive code has room.
@@ -130,27 +167,34 @@ stack so ordinary recursive code has room.
 ```text
 crates/
   korben-syntax/   source maps, spans, diagnostics, lexer, reader, formatter
+  korben-runtime/  values, call dispatch, the standard library -- shared by the
+                   interpreter and by generated native code
   korben-core/     lowering, macro expansion, types, inference, evaluator,
-                   standard library, project loading, docs, build artifacts
+                   core IR, the native backend, project loading, docs
   korben-cli/      the `korben` executable
 examples/          runnable programs, covered by the test suite
 spec.md            the language and platform specification
 ```
 
 The implementation has no dependencies outside the Rust standard library, so the
-toolchain stays a single self-contained binary.
+toolchain stays a single self-contained binary. `korben-runtime`'s source is
+embedded in it and written into each generated project, which is what keeps
+native builds reproducible and offline.
 
 ## Development
 
 ```sh
-cargo test              # 98 tests: reader, formatter, evaluator, checker, CLI
+cargo test              # 107 tests: reader, formatter, evaluator, checker,
+                        # CLI, and interpreter-vs-native differential tests
 cargo clippy --workspace --all-targets
 cargo fmt
 ```
 
 The CLI tests drive the real executable through the whole documented workflow —
-`new`, `check`, `test`, `fmt`, `run`, `doc`, `build`, and running the resulting
-artifact — for every project template.
+`new`, `check`, `test`, `fmt`, `run`, `doc`, `build` — for every project
+template. The differential tests additionally compile programs to native
+executables and compare their output against the interpreter; they skip
+themselves when `cargo` is unavailable.
 
 ## License
 

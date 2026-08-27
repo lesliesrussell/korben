@@ -12,26 +12,6 @@
 (pub macro unless [condition ...body]
   `(if (not ~condition) (do ~@body) nil))
 
-;;; Short-circuiting conjunction. Returns the last value when every form passes.
-(pub macro and [...forms]
-  (if (empty? forms)
-    true
-    (if (= (len forms) 1)
-      (get forms 0)
-      `(do
-         (let value ~(get forms 0))
-         (if value (and ~@(rest forms)) false)))))
-
-;;; Short-circuiting disjunction. Returns the first truthy value.
-(pub macro or [...forms]
-  (if (empty? forms)
-    false
-    (if (= (len forms) 1)
-      (get forms 0)
-      `(do
-         (let value ~(get forms 0))
-         (if value value (or ~@(rest forms)))))))
-
 ;;; Test/result pairs, evaluated in order. Use `:else` for the final branch.
 (pub macro cond [...clauses]
   (if (empty? clauses)

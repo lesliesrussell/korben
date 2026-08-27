@@ -179,6 +179,8 @@ pub enum Expr {
         els: Option<Box<Expr>>,
         span: Span,
     },
+    And(Vec<Expr>, Span),
+    Or(Vec<Expr>, Span),
     Do(Box<Block>, Span),
     Lambda(Box<Lambda>, Span),
     Call {
@@ -659,6 +661,12 @@ impl<'a> Lowerer<'a> {
                 els: els.as_ref().map(|els| Box::new(self.expr(els))),
                 span: *span,
             },
+            ast::Expr::And(operands, span) => {
+                Expr::And(operands.iter().map(|operand| self.expr(operand)).collect(), *span)
+            }
+            ast::Expr::Or(operands, span) => {
+                Expr::Or(operands.iter().map(|operand| self.expr(operand)).collect(), *span)
+            }
             ast::Expr::Do(body, span) => Expr::Do(Box::new(self.block(body)), *span),
             ast::Expr::Lambda(decl, span) => {
                 self.push_scope();
@@ -1088,6 +1096,8 @@ fn render_expr(expr: &Expr, depth: usize) -> String {
             ),
             None => format!("(if {} {})", render_expr(cond, depth), render_expr(then, depth)),
         },
+        Expr::And(operands, _) => format!("(and {})", render_list(operands, depth)),
+        Expr::Or(operands, _) => format!("(or {})", render_list(operands, depth)),
         Expr::Do(block, _) => {
             format!("(do\n{}{})", render_block(block, depth + 1), indent(depth))
         }

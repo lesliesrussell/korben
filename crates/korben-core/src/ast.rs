@@ -362,6 +362,10 @@ pub enum Expr {
         els: Option<Box<Expr>>,
         span: Span,
     },
+    /// Short-circuiting conjunction: the last value, or the first falsey one.
+    And(Vec<Expr>, Span),
+    /// Short-circuiting disjunction: the first truthy value, or the last one.
+    Or(Vec<Expr>, Span),
     Do(Box<Body>, Span),
     Lambda(Rc<FnDecl>, Span),
     Call {
@@ -462,6 +466,8 @@ impl Expr {
             | Expr::Set(_, span)
             | Expr::Record { span, .. }
             | Expr::If { span, .. }
+            | Expr::And(_, span)
+            | Expr::Or(_, span)
             | Expr::Do(_, span)
             | Expr::Lambda(_, span)
             | Expr::Call { span, .. }
