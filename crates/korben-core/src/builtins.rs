@@ -29,6 +29,14 @@ pub fn install(interp: &mut Interp) {
     interp.method_owner.insert("drop".to_string(), "Drop".to_string());
 }
 
+// korben-4io
+/// Whether `name` addresses a runtime module -- either a standard-library
+/// module such as `std.string`, or a type addressed like one, as `Cell.new` is.
+pub fn is_runtime_module(name: &str) -> bool {
+    let prefix = format!("{name}/");
+    korben_runtime::std::NAMES.iter().any(|entry| entry.starts_with(&prefix))
+}
+
 /// The canonical runtime name for a member of a module, if it has one.
 pub fn runtime_name(module: &str, member: &str) -> Option<&'static str> {
     let key = format!("{module}/{member}");

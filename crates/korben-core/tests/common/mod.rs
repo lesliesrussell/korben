@@ -109,6 +109,21 @@ pub fn check_strict(source: &str) -> Vec<String> {
     check_with(source, true)
 }
 
+// korben-4io
+/// Type-check `source` and return the rendered error messages, help included.
+pub fn check_messages(source: &str) -> Vec<String> {
+    let mut session = Session::bare(PathBuf::from("."));
+    let _ = session.load_text("test", source);
+    korben_core::infer::check_session(&mut session, false);
+    session
+        .diagnostics
+        .items
+        .iter()
+        .filter(|item| item.is_error())
+        .map(|item| format!("{} -- {}", item.message, item.help.join("; ")))
+        .collect()
+}
+
 fn check_with(source: &str, strict: bool) -> Vec<String> {
     let mut session = Session::bare(PathBuf::from("."));
     let _ = session.load_text("test", source);

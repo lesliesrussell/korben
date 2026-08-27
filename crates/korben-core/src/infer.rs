@@ -1007,7 +1007,7 @@ impl Checker {
             }
             Expr::Keyword(_, _) => Type::keyword(),
             Expr::Var(name, span) => self.lookup(name, *span, scope),
-            Expr::Path { module, name, .. } => self.through(module, name),
+            Expr::Path { module, name, span } => self.through(module, name, *span),
             Expr::Vector(items, _) => {
                 // A literal whose elements agree is a `Vec`; one whose elements
                 // differ is a fixed-length tuple, per specification 9.5.
@@ -1102,10 +1102,13 @@ impl Checker {
             Expr::Field { target, name, span } => {
                 // `alias.name` is a module member unless `alias` is a binding.
                 if let Expr::Var(root, _) = &**target {
+                    // A type addressed like a module, as in `(Cell.new 1)`,
+                    // reaches the runtime through the same path as an alias.
                     if scope.lookup(root).is_none()
-                        && self.namespace.module_of(&self.module, root).is_some()
+                        && (self.namespace.module_of(&self.module, root).is_some()
+                            || crate::builtins::is_runtime_module(root))
                     {
-                        return self.through(root, name);
+                        return self.through(root, name, *span);
                     }
                 }
                 let target_type = self.infer(target, scope);
@@ -1373,15 +1376,45 @@ impl Checker {
     }
 
     /// A value reached through an import alias.
-    fn through(&mut self, alias: &str, name: &str) -> Type {
-        match self.namespace.through(&self.module, alias, name) {
-            Some(qualified) => match self.globals.get(qualified).cloned() {
+    fn through(&mut self, alias: &str, name: &str, span: Span) -> Type {
+        if let Some(qualified) = self.namespace.through(&self.module, alias, name) {
+            return match self.globals.get(qualified).cloned() {
                 Some(scheme) => self.instantiate(&scheme),
                 None => Type::Unknown,
-            },
-            // A native standard-library module has no declarations to consult.
-            None => Type::Unknown,
+            };
         }
+        // A native standard-library module has no declarations to consult, so
+        // ask the runtime whether it carries the member.
+        let target = self.namespace.module_of(&self.module, alias).unwrap_or(alias).to_string();
+        if crate::builtins::runtime_name(&target, name).is_some() {
+            return Type::Unknown;
+        }
+        // Neither the module's declarations nor the runtime has it. Say so here
+        // rather than leaving it for whichever run first reaches the call.
+        let mut diagnostic = Diagnostic::error(format!("`{target}` has no member `{name}`"))
+            .with_code("unbound-name")
+            .at(span, "not found in that module");
+        diagnostic = match self.suggest_member(&target, name) {
+            Some(suggestion) => diagnostic.help(format!("did you mean `{suggestion}`?")),
+            None => diagnostic.help("only `pub` declarations are visible to importers"),
+        };
+        self.diagnostics.push(diagnostic);
+        Type::Unknown
+    }
+
+    /// The closest member of `module` by edit distance.
+    fn suggest_member(&self, module: &str, name: &str) -> Option<String> {
+        closest(name, self.members_of(module))
+    }
+
+    /// Every name `module` offers: its declarations, and its runtime builtins.
+    fn members_of<'a>(&'a self, module: &str) -> impl Iterator<Item = String> + 'a {
+        let prefix = format!("{module}/");
+        self.namespace.visible_values(module).map(str::to_string).chain(
+            korben_runtime::std::NAMES
+                .iter()
+                .filter_map(move |entry| entry.strip_prefix(&prefix).map(str::to_string)),
+        )
     }
 
     fn field_type(&mut self, target: &Type, name: &str, span: Span) -> Type {
@@ -1441,12 +1474,14 @@ impl Checker {
         Type::Unknown
     }
 
+    // korben-4io
     fn lookup(&mut self, name: &str, span: Span, scope: &Scope) -> Type {
         if let Some(scheme) = scope.lookup(name) {
             return self.instantiate(&scheme);
         }
         // A module-level name means whatever this module says it means.
-        if let Some(qualified) = self.namespace.value(&self.module, name) {
+        let declared = self.namespace.value(&self.module, name).map(str::to_string);
+        if let Some(qualified) = &declared {
             if let Some(scheme) = self.globals.get(qualified).cloned() {
                 return self.instantiate(&scheme);
             }
@@ -1455,10 +1490,30 @@ impl Checker {
         if let Some(scheme) = self.globals.get(name).cloned() {
             return self.instantiate(&scheme);
         }
-        // Unbound names are reported by the evaluator with better context; the
-        // checker stays quiet so that one mistake is not reported twice.
-        let _ = span;
+        // Reachable at run time, but with no signature the checker can use: a
+        // declaration it chose not to type precisely, or a runtime builtin.
+        if declared.is_some()
+            || crate::builtins::runtime_name(crate::builtins::PRELUDE, name).is_some()
+        {
+            return Type::Unknown;
+        }
+        // Nothing defines this name. The evaluator would report it, but only on
+        // the path that reaches it, and `korben check` never runs the evaluator
+        // at all -- so the checker has to be the one to say so.
+        let mut diagnostic = Diagnostic::error(format!("`{name}` is not defined"))
+            .with_code("unbound-name")
+            .at(span, "no binding with this name is in scope");
+        if let Some(suggestion) = self.suggest_name(name) {
+            diagnostic = diagnostic.help(format!("did you mean `{suggestion}`?"));
+        }
+        self.diagnostics.push(diagnostic);
         Type::Unknown
+    }
+
+    /// The closest name in scope by edit distance, for `did you mean` help.
+    fn suggest_name(&self, name: &str) -> Option<String> {
+        let visible = self.namespace.visible_values(&self.module).map(str::to_string);
+        closest(name, visible.chain(self.members_of(crate::builtins::PRELUDE)))
     }
 
     /// The common type of a group, or `Unknown` when they do not agree.
@@ -1907,4 +1962,23 @@ fn collect_used(expr: &Expr, out: &mut HashSet<String>) {
         }
         _ => {}
     }
+}
+
+/// The nearest candidate to `name`, or nothing when none is near enough.
+///
+/// Only a close miss helps. A suggestion further away than a third of the name
+/// is noise wearing the costume of help, so it is withheld.
+fn closest(name: &str, candidates: impl Iterator<Item = String>) -> Option<String> {
+    let limit = name.len().div_ceil(3).max(1);
+    let mut best: Option<(usize, String)> = None;
+    for candidate in candidates {
+        let distance = crate::eval::edit_distance(name, &candidate);
+        if distance > limit {
+            continue;
+        }
+        if best.as_ref().is_none_or(|(shortest, _)| distance < *shortest) {
+            best = Some((distance, candidate));
+        }
+    }
+    best.map(|(_, candidate)| candidate)
 }

@@ -3,7 +3,7 @@
 // korben-6bc
 
 mod common;
-use common::{check, check_strict, lint};
+use common::{check, check_messages, check_strict, lint};
 
 #[test]
 fn well_typed_code_produces_no_errors() {
@@ -193,4 +193,64 @@ fn lints_ask_for_documentation_on_public_functions() {
 fn lints_flag_unsafe_boundaries() {
     let codes = lint("(unsafe fn poke [] 1)");
     assert!(codes.contains(&"unsafe-boundary".to_string()), "{codes:?}");
+}
+
+// ------------------------------------------------------------- name resolution
+
+// korben-4io
+#[test]
+fn an_undefined_name_is_reported_by_the_checker() {
+    // `korben check` never runs the evaluator, so if the checker stays quiet
+    // about this the mistake reaches a run before anything reports it.
+    assert_eq!(check("(fn f [] -> Int (totally-undefined-fn 1))"), vec!["unbound-name"]);
+}
+
+#[test]
+fn an_undefined_name_inside_a_test_is_reported() {
+    assert_eq!(
+        check("(fn f [] -> Int 1)\n(test \"t\" (assert-eq 1 (missing-helper)))"),
+        vec!["unbound-name"]
+    );
+}
+
+#[test]
+fn a_near_miss_suggests_the_name_it_missed() {
+    let messages = check_messages("(fn slug [] -> Int 1)\n(fn f [] -> Int (slugg))");
+    assert_eq!(messages, vec!["`slugg` is not defined -- did you mean `slug`?"]);
+}
+
+#[test]
+fn a_misspelled_builtin_suggests_the_builtin() {
+    let messages = check_messages("(fn f [] -> Unit !io (printn \"x\"))");
+    assert_eq!(messages, vec!["`printn` is not defined -- did you mean `println`?"]);
+}
+
+#[test]
+fn a_distant_name_gets_no_suggestion() {
+    // A suggestion further away than a third of the name is noise, not help.
+    let messages = check_messages("(fn f [] -> Int (zzzzzzzzzz))");
+    assert_eq!(messages, vec!["`zzzzzzzzzz` is not defined -- "]);
+}
+
+#[test]
+fn a_member_a_module_does_not_have_is_reported() {
+    let messages = check_messages(
+        "(module m (use std.string :as string))\n(fn f [] -> String (string.lowr \"X\"))",
+    );
+    assert_eq!(messages, vec!["`std.string` has no member `lowr` -- did you mean `lower`?"]);
+}
+
+#[test]
+fn names_that_do_resolve_stay_quiet() {
+    // Locals, module declarations, prelude builtins, module members, and a type
+    // addressed like a module all resolve -- none of them may be reported.
+    assert!(check(
+        r#"(module m (use std.string :as string))
+           (fn helper [text: String] -> String (string.upper text))
+           (fn f [] -> Unit !io
+             (let cell (Cell.new 1))
+             (let value (helper "x"))
+             (println value (cell.get)))"#
+    )
+    .is_empty());
 }

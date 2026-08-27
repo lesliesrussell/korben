@@ -127,6 +127,12 @@ impl Namespace {
         self.values.get(module)?.get(name).map(String::as_str)
     }
 
+    // korben-4io
+    /// Every value name `module` can write bare, for `did you mean` help.
+    pub fn visible_values(&self, module: &str) -> impl Iterator<Item = &str> {
+        self.values.get(module).into_iter().flat_map(|table| table.keys().map(String::as_str))
+    }
+
     /// The declaration a type name refers to, seen from `module`.
     pub fn ty(&self, module: &str, name: &str) -> Option<&str> {
         self.types.get(module)?.get(name).map(String::as_str)

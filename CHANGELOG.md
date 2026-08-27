@@ -9,6 +9,18 @@
   is verified reproducible by a test that regenerates it and compares bytes,
   and the same test confirms an edited dependency stops the build.
 
+### Fixed
+
+- `korben check` reports unbound names. It had left them to the evaluator,
+  which meant a module calling an undefined function checked clean and only
+  failed once a run reached that line -- and `korben check` never runs the
+  evaluator at all. Names reachable at run time but without a signature the
+  checker can use are still accepted silently, so this reports mistakes rather
+  than gaps in the checker's knowledge.
+- A member a module does not have is reported too, whether the module is
+  written in Korben or provided by the runtime. Both diagnostics suggest the
+  nearest name, and withhold a suggestion that is not close enough to help.
+
 ### Changed
 
 - The `service` template is written over `std.http` rather than hand-rolling a
