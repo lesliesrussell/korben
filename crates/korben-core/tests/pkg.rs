@@ -351,3 +351,30 @@ fn an_ordinary_manifest_is_still_accepted() {
     assert_eq!(manifest.dependencies.len(), 1);
     assert_eq!(manifest.dependencies[0].requirement, "^0.1");
 }
+
+/// The toolchain carries the runtime's source so generated projects build
+/// offline. A new runtime module that is not carried would only fail later, in
+/// someone else's `korben build`, so it is checked here.
+#[test]
+fn every_runtime_source_file_is_vendored_into_generated_projects() {
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates directory")
+        .join("korben-runtime/src");
+    let mut missing = Vec::new();
+    for entry in std::fs::read_dir(&runtime).expect("read runtime sources") {
+        let path = entry.expect("entry").path();
+        if path.extension().map(|extension| extension != "rs").unwrap_or(true) {
+            continue;
+        }
+        let name = format!("src/{}", path.file_name().unwrap().to_string_lossy());
+        if !korben_core::codegen::RUNTIME_FILES.iter().any(|(carried, _)| *carried == name) {
+            missing.push(name);
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "these runtime files are not carried into generated projects: {missing:?}\n\
+         add them to RUNTIME_FILES in codegen.rs"
+    );
+}

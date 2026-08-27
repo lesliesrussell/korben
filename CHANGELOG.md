@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.6.0 — HTTP
+
+A typed HTTP program can now be written, which closes the last open half of
+v0.1 acceptance criterion 3. Every criterion in specification section 28 is
+now met.
+
+### Added
+
+- **`std.net`**: blocking TCP. `Listener` and `Connection` are resource-bearing
+  handles, so `with` releases them and the ownership analysis governs them.
+  Socket operations are methods on the receiver, which borrows rather than
+  moves it — that is what lets an accept loop keep its listener.
+- **`std.http`**, written in Korben over `std.net` and carried inside the
+  toolchain. Requests and responses are ordinary records, `HttpError` an
+  ordinary enum, and routing ordinary pattern matching. Parses and renders
+  HTTP/1.1, reads bodies by `content-length`, and provides a server, a client,
+  and `test-request` for exercising a handler without a socket.
+- **Embedded standard-library modules**: Korben source the toolchain carries and
+  loads on demand, so it stays in step with the compiler that ships it.
+- `std.string/split-once`, `std.string/byte-length`, `std.string/repeat`, and
+  `std.core/keyword`.
+- `examples/http.kb`, the specification's section 29 reference program.
+
+### Fixed
+
+- **Names were global across modules in the type checker**, so two modules
+  declaring the same `handle` or `BadRequest` were conflated. Modules now have
+  their own namespaces: a name resolves through the module's declarations and
+  its imports, and types are keyed by `module/name` while diagnostics still show
+  the short name.
+- Unifying a type variable with itself failed the occurs check, which rejected
+  correct programs whose inference happened to reach that state.
+- The checker mismatched `:keyword value` arguments to functions that declare no
+  such keyword. Function types now carry their keyword parameters, so the
+  checker and the runtime agree on how an argument binds.
+- A new runtime source file that was not carried into generated projects would
+  only fail later, inside someone else's `korben build`. A test now checks the
+  two lists agree.
+
+### Not in this release
+
+The async runtime, so a server handles one request at a time on the accepting
+task. TLS: only `http://` is supported.
+
 ## 0.5.0 — Dependencies and reproducible builds
 
 A build now reproduces from `korben.lock`, closing v0.1 acceptance

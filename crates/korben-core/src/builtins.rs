@@ -19,7 +19,7 @@ pub fn install(interp: &mut Interp) {
         runtime.exports.borrow_mut().insert(member.to_string(), value);
     }
     // `Cell` and `File` are addressed as type names rather than module paths.
-    for name in ["Cell", "File"] {
+    for name in ["Cell", "File", "Listener", "Connection"] {
         let module = interp.module(name);
         interp.modules.insert(name.to_string(), module);
     }

@@ -622,3 +622,171 @@ fn a_manifest_declaring_an_install_script_is_refused() {
     assert!(text.contains("would run code at install time"), "{text}");
     assert!(text.contains("21.3"), "{text}");
 }
+
+/// A port nothing is listening on right now.
+fn free_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    drop(listener);
+    port
+}
+
+/// Send one request and read the whole response.
+fn request(port: u16, raw: &str) -> String {
+    use std::io::{Read, Write};
+    // The server needs a moment to bind, so connecting is retried briefly.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut stream = loop {
+        match std::net::TcpStream::connect(("127.0.0.1", port)) {
+            Ok(stream) => break stream,
+            Err(error) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                let _ = error;
+            }
+            Err(error) => panic!("could not reach the server on {port}: {error}"),
+        }
+    };
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+    stream.write_all(raw.as_bytes()).expect("write");
+    stream.flush().expect("flush");
+    let mut response = String::new();
+    stream.read_to_string(&mut response).expect("read");
+    response
+}
+
+/// The server is real: it binds a socket, speaks HTTP/1.1, and answers a client
+/// that knows nothing about Korben.
+#[test]
+fn the_http_server_answers_a_real_client() {
+    let scratch = Scratch::new("http");
+    assert!(korben(scratch.path(), &["new", "app"]).status.success());
+    let project = scratch.path().join("app");
+    std::fs::remove_file(project.join("tests/main_test.kb")).unwrap();
+    let port = free_port();
+    std::fs::write(
+        project.join("src/main.kb"),
+        format!(
+            r#"(module main
+  (use std.http :as http)
+  (use std.json :as json))
+
+;;; Route a request to a response.
+(pub fn handle [request: http.Request] -> http.Response
+  (match request
+    {{:method :get :path "/health"}} (http.text 200 "ok")
+    {{:method :get :path "/greeting" :query {{"name" name}}}}
+      (http.json 200 (json.encode {{message name}}))
+    {{:method :post :path "/echo"}} (http.text 200 request.body)
+    _ (http.not-found)))
+
+(pub fn main [] -> Unit !io
+  (match (http.serve "127.0.0.1:{port}" handle)
+    (Ok _) nil
+    (Err error) (println "server stopped:" (http.describe error))))
+"#
+        ),
+    )
+    .unwrap();
+
+    let check = korben(&project, &["check"]);
+    assert!(check.status.success(), "{}", combined(&check));
+
+    let mut server = Command::new(EXE)
+        .arg("run")
+        .current_dir(&project)
+        .env("NO_COLOR", "1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("start the server");
+
+    let health = request(port, "GET /health HTTP/1.1\r\nhost: localhost\r\n\r\n");
+    assert!(health.starts_with("HTTP/1.1 200 OK\r\n"), "{health:?}");
+    assert!(health.contains("content-length: 2\r\n"), "{health:?}");
+    assert!(health.ends_with("\r\n\r\nok"), "{health:?}");
+
+    let greeting = request(port, "GET /greeting?name=Ada HTTP/1.1\r\nhost: localhost\r\n\r\n");
+    assert!(greeting.contains("content-type: application/json"), "{greeting:?}");
+    assert!(greeting.ends_with("{\"message\":\"Ada\"}"), "{greeting:?}");
+
+    // A body is read using `content-length`, not guessed at.
+    let echo = request(
+        port,
+        "POST /echo HTTP/1.1\r\nhost: localhost\r\ncontent-length: 11\r\n\r\nhello there",
+    );
+    assert!(echo.ends_with("\r\n\r\nhello there"), "{echo:?}");
+
+    let missing = request(port, "GET /nowhere HTTP/1.1\r\nhost: localhost\r\n\r\n");
+    assert!(missing.starts_with("HTTP/1.1 404 Not Found\r\n"), "{missing:?}");
+
+    let _ = server.kill();
+    let _ = server.wait();
+}
+
+/// The client and the server speak to each other, in separate processes.
+#[test]
+fn the_http_client_talks_to_the_http_server() {
+    let scratch = Scratch::new("httpclient");
+    assert!(korben(scratch.path(), &["new", "server"]).status.success());
+    assert!(korben(scratch.path(), &["new", "client"]).status.success());
+    let server_project = scratch.path().join("server");
+    let client_project = scratch.path().join("client");
+    std::fs::remove_file(server_project.join("tests/main_test.kb")).unwrap();
+    std::fs::remove_file(client_project.join("tests/main_test.kb")).unwrap();
+    let port = free_port();
+
+    std::fs::write(
+        server_project.join("src/main.kb"),
+        format!(
+            r#"(module main
+  (use std.http :as http))
+
+;;; Answer every request the same way.
+(pub fn handle [request: http.Request] -> http.Response
+  (http.text 200 (str "you asked for " request.path)))
+
+(pub fn main [] -> Unit !io
+  (match (http.serve "127.0.0.1:{port}" handle)
+    (Ok _) nil
+    (Err error) (println "server stopped:" (http.describe error))))
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        client_project.join("src/main.kb"),
+        format!(
+            r#"(module main
+  (use std.http :as http))
+
+(pub fn main [] -> Unit !io
+  (match (http.get-url "http://127.0.0.1:{port}/hello")
+    (Ok response) (println response.status response.body)
+    (Err error) (println "error:" (http.describe error))))
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut server = Command::new(EXE)
+        .arg("run")
+        .current_dir(&server_project)
+        .env("NO_COLOR", "1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("start the server");
+
+    // Wait for the socket to be accepting before the client runs.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(std::time::Instant::now() < deadline, "the server never bound {port}");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    let client = korben(&client_project, &["run"]);
+    let _ = server.kill();
+    let _ = server.wait();
+    assert!(client.status.success(), "{}", combined(&client));
+    assert_eq!(stdout(&client), "200 you asked for /hello\n");
+}

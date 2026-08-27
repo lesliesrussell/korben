@@ -37,6 +37,9 @@ pub struct FnType {
     pub effects: Effects,
     /// True for functions such as `println` that accept extra arguments.
     pub variadic: bool,
+    /// Names this function accepts as `:keyword value`, which bind by name
+    /// rather than by position.
+    pub keywords: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -56,12 +59,22 @@ impl Type {
     }
 
     pub fn function(params: Vec<Type>, ret: Type, effects: Effects) -> Type {
-        Type::Fn(Rc::new(FnType { params, ret, effects, variadic: false }))
+        Type::Fn(Rc::new(FnType { params, ret, effects, variadic: false, keywords: Vec::new() }))
+    }
+
+    /// A function that also accepts named arguments.
+    pub fn with_keywords(
+        params: Vec<Type>,
+        ret: Type,
+        effects: Effects,
+        keywords: Vec<String>,
+    ) -> Type {
+        Type::Fn(Rc::new(FnType { params, ret, effects, variadic: false, keywords }))
     }
 
     /// A function that accepts at least `params` arguments and then any number more.
     pub fn variadic(params: Vec<Type>, ret: Type, effects: Effects) -> Type {
-        Type::Fn(Rc::new(FnType { params, ret, effects, variadic: true }))
+        Type::Fn(Rc::new(FnType { params, ret, effects, variadic: true, keywords: Vec::new() }))
     }
 
     pub fn unit() -> Type {
@@ -142,9 +155,10 @@ impl fmt::Display for Type {
         match self {
             Type::Var(var) => write!(out, "{}", var_name(*var)),
             Type::Unknown => out.write_str("_"),
-            Type::Con(name, args) if args.is_empty() => out.write_str(name),
+            // Types are keyed by `module/name`; a reader only wants the name.
+            Type::Con(name, args) if args.is_empty() => out.write_str(short(name)),
             Type::Con(name, args) => {
-                write!(out, "{name}")?;
+                write!(out, "{}", short(name))?;
                 for arg in args {
                     match arg {
                         Type::Con(_, inner) if !inner.is_empty() => write!(out, " ({arg})")?,
@@ -196,6 +210,10 @@ impl fmt::Display for Type {
             }
         }
     }
+}
+
+fn short(name: &str) -> &str {
+    name.rsplit('/').next().unwrap_or(name)
 }
 
 /// Inference variables print as `T`, `U`, ... so diagnostics stay readable.

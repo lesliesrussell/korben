@@ -26,6 +26,12 @@ pub const MANIFEST_NAME: &str = "korben.toml";
 
 const PRELUDE_SOURCE: &str = include_str!("prelude.kb");
 
+/// Standard-library modules written in Korben and carried inside the toolchain.
+///
+/// They are loaded on demand, from memory, so they need no files on disk and
+/// stay in step with the compiler that ships them.
+const EMBEDDED_MODULES: &[(&str, &str)] = &[("std.http", include_str!("stdlib/http.kb"))];
+
 /// Protocols the compiler knows how to derive.
 pub const DERIVABLE: &[&str] = &["Eq", "Hash", "Ord", "Json", "Encode", "Decode", "Show", "Clone"];
 
@@ -201,6 +207,16 @@ impl Session {
         // Standard library modules are provided natively, not read from disk.
         if self.interp.modules.contains_key(name) {
             return Ok(self.interp.module(name));
+        }
+        // Some of the standard library is written in Korben and embedded.
+        if let Some((_, source)) = EMBEDDED_MODULES.iter().find(|(module, _)| *module == name) {
+            self.loading.push(name.to_string());
+            let file = self.sources.add(format!("<{name}>"), source.to_string());
+            let source = source.to_string();
+            let loaded = self.load_source(file, &source, name.to_string(), Some(name.to_string()));
+            self.loading.pop();
+            self.module_package.insert(name.to_string(), "std".to_string());
+            return loaded;
         }
         if self.loading.iter().any(|existing| existing == name) {
             let cycle = self.loading.join(" -> ");

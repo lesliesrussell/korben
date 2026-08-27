@@ -1,0 +1,68 @@
+;;; A typed HTTP service.
+;;;
+;;; This is the specification's section 29 reference program, over the real
+;;; `std.http`. Run it with `korben run examples/http.kb`, which exercises the
+;;; handler and exits, or `korben run examples/http.kb -- serve` to listen on
+;;; port 3000.
+(module http-service
+  (use std.http :as http)
+  (use std.json :as json)
+  (use std.log :as log)
+  (use std.process :as process))
+
+(pub type Greeting
+  {message: String})
+
+(pub enum AppError
+  (BadRequest message: String)
+  (Internal cause: String))
+
+;;; Build the greeting for a name.
+(pub fn greeting-for [name: String] -> Result Greeting AppError
+  (if (empty? name)
+    (Err (BadRequest "a name is required"))
+    (Ok (Greeting {message (format "Hello, {name}")}))))
+
+;;; Route a request to a response.
+;;;
+;;; Routing is ordinary pattern matching over the request record: the method,
+;;; the path, and the query string are all just fields.
+(pub fn handle [request: http.Request] -> http.Response
+  (match request
+    {:method :get :path "/health"} (http.text 200 "ok")
+
+    {:method :get :path "/greeting" :query {"name" name}}
+      (match (greeting-for name)
+        (Ok greeting) (http.json 200 (json.encode greeting))
+        (Err error) (http.json 400 (json.encode {error (describe error)})))
+
+    {:method :get :path "/greeting"} (http.json 200 (json.encode {message "Hello, world"}))
+
+    _ (http.not-found)))
+
+;;; A readable description of a failure.
+(pub fn describe [error: AppError] -> String
+  (match error
+    (BadRequest message) message
+    (Internal cause) cause))
+
+(fn show [label: String response: http.Response] -> Unit !io
+  (println (format "{label} -> {response.status} {response.body}")))
+
+(pub fn main [] -> Unit !io
+  (match (process.args)
+    ["serve"]
+      (do
+        (log.info "listening" {port 3000})
+        (match (http.serve "127.0.0.1:3000" handle)
+          (Ok _) nil
+          (Err error) (println "server stopped:" (http.describe error))))
+
+    _
+      (do
+        ; Without a socket, a handler is an ordinary function to call.
+        (show "GET /health" (handle (http.test-request :get "/health")))
+        (show "GET /greeting?name=Ada" (handle (http.test-request :get "/greeting?name=Ada")))
+        (show "GET /greeting" (handle (http.test-request :get "/greeting")))
+        (show "GET /missing" (handle (http.test-request :get "/missing")))
+        (show "POST /health" (handle (http.test-request :post "/health"))))))

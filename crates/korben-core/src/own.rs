@@ -981,6 +981,8 @@ fn positional_modes(params: &[(Category, Option<String>)], args: &[Arg]) -> Vec<
 fn native_result(name: &str) -> Option<&'static str> {
     match name {
         "open" | "create" => Some("File"),
+        "listen" => Some("Listener"),
+        "connect" | "accept" => Some("Connection"),
         _ => None,
     }
 }

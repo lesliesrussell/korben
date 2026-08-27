@@ -1211,12 +1211,13 @@ fn quote_value(value: &korben_runtime::Value) -> String {
 
 /// The runtime crate's source, embedded so that generated projects build
 /// offline and reproducibly without a registry.
-const RUNTIME_FILES: &[(&str, &str)] = &[
+pub const RUNTIME_FILES: &[(&str, &str)] = &[
     ("src/lib.rs", include_str!("../../korben-runtime/src/lib.rs")),
     ("src/loc.rs", include_str!("../../korben-runtime/src/loc.rs")),
     ("src/value.rs", include_str!("../../korben-runtime/src/value.rs")),
     ("src/apply.rs", include_str!("../../korben-runtime/src/apply.rs")),
     ("src/ffi.rs", include_str!("../../korben-runtime/src/ffi.rs")),
+    ("src/net.rs", include_str!("../../korben-runtime/src/net.rs")),
     ("src/std.rs", include_str!("../../korben-runtime/src/std.rs")),
     ("src/json.rs", include_str!("../../korben-runtime/src/json.rs")),
 ];

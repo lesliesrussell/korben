@@ -123,7 +123,7 @@ fn compare(
     Ok(Value::Bool(true))
 }
 
-fn io_error(path: &str, error: &std::io::Error) -> Value {
+pub(crate) fn io_error(path: &str, error: &std::io::Error) -> Value {
     Value::Record(Rc::new(RecordValue {
         type_name: Some(Rc::from("IoError")),
         fields: vec![
@@ -191,6 +191,7 @@ pub const NAMES: &[&str] = &[
     "std.core/str",
     "std.core/type-of",
     "std.core/clone",
+    "std.core/keyword",
     "std.core/identity",
     "std.core/println",
     "std.core/print",
@@ -218,6 +219,9 @@ pub const NAMES: &[&str] = &[
     "std.string/chars",
     "std.string/parse-int",
     "std.string/parse-float",
+    "std.string/split-once",
+    "std.string/byte-length",
+    "std.string/repeat",
     // std.math
     "std.math/abs",
     "std.math/sqrt",
@@ -230,6 +234,20 @@ pub const NAMES: &[&str] = &[
     "std.fs/exists?",
     "std.fs/read-lines",
     "std.fs/list-dir",
+    // std.net: blocking TCP
+    "std.net/listen",
+    "std.net/connect",
+    "Listener/accept",
+    "Listener/address",
+    "Listener/close",
+    "Listener/closed?",
+    "Listener/drop",
+    "Connection/read",
+    "Connection/write",
+    "Connection/peer",
+    "Connection/close",
+    "Connection/closed?",
+    "Connection/drop",
     "std.fs/open",
     "std.fs/create",
     // File: a resource with deterministic cleanup.
@@ -617,6 +635,9 @@ pub fn builtin(name: &str) -> Option<Value> {
         // Collections are persistent, so a clone is a new handle on the same
         // immutable structure. Cloning a resource is rejected at compile time.
         "std.core/clone" => native("clone", 1, |_, args, _| Ok(args[0].clone())),
+        "std.core/keyword" => native("keyword", 1, |_, args, loc| {
+            Ok(Value::keyword(&as_string("keyword", &args[0], loc)?))
+        }),
         "std.core/identity" => native("identity", 1, |_, args, _| Ok(args[0].clone())),
 
         "std.core/println" | "std.io/println" => native("println", 0, |caller, args, _| {
@@ -765,6 +786,29 @@ pub fn builtin(name: &str) -> Option<Value> {
             })
         }),
 
+        // Splitting once keeps the remainder intact, which matters when the
+        // separator can also appear inside the part being split off.
+        "std.string/split-once" => native("split-once", 2, |_, args, loc| {
+            let text = as_string("string.split-once", &args[0], loc)?;
+            let separator = as_string("string.split-once", &args[1], loc)?;
+            Ok(match text.split_once(separator.as_str()) {
+                Some((head, tail)) => Value::some(Value::vector(vec![
+                    Value::str(head.to_string()),
+                    Value::str(tail.to_string()),
+                ])),
+                None => Value::none(),
+            })
+        }),
+        // Byte length, which is what a `content-length` header counts.
+        "std.string/byte-length" => native("byte-length", 1, |_, args, loc| {
+            Ok(Value::Int(as_string("string.byte-length", &args[0], loc)?.len() as i64))
+        }),
+        "std.string/repeat" => native("repeat", 2, |_, args, loc| {
+            let text = as_string("string.repeat", &args[0], loc)?;
+            let count = as_int("string.repeat", &args[1], loc)?.max(0) as usize;
+            Ok(Value::str(text.repeat(count)))
+        }),
+
         "std.math/abs" => native("abs", 1, |_, args, loc| match &args[0] {
             Value::Int(value) => Ok(Value::Int(value.abs())),
             Value::Float(value) => Ok(Value::Float(value.abs())),
@@ -883,6 +927,31 @@ pub fn builtin(name: &str) -> Option<Value> {
             Ok(Value::Bool(closed))
         }),
 
+        "std.net/listen" => native("listen", 1, |_, args, loc| {
+            crate::net::listen(&as_string("net.listen", &args[0], loc)?)
+        }),
+        "std.net/connect" => native("connect", 1, |_, args, loc| {
+            crate::net::connect(&as_string("net.connect", &args[0], loc)?)
+        }),
+        "Listener/accept" => native("accept", 1, |_, args, loc| crate::net::accept(&args[0], loc)),
+        "Listener/address" => {
+            native("address", 1, |_, args, loc| crate::net::local_address(&args[0], loc))
+        }
+        "Connection/read" => native("read", 1, |_, args, loc| crate::net::read(&args[0], loc)),
+        "Connection/write" => native("write", 2, |_, args, loc| {
+            let text = as_string("Connection.write", &args[1], loc)?;
+            crate::net::write(&args[0], &text, loc)
+        }),
+        "Connection/peer" => {
+            native("peer", 1, |_, args, loc| crate::net::peer_address(&args[0], loc))
+        }
+        "Listener/close" | "Listener/drop" | "Connection/close" | "Connection/drop" => {
+            native("close", 1, |_, args, _| crate::net::close(&args[0]))
+        }
+        "Listener/closed?" | "Connection/closed?" => {
+            native("closed?", 1, |_, args, _| crate::net::is_closed(&args[0]))
+        }
+
         "std.json/encode" => {
             native("encode", 1, |_, args, _| Ok(Value::str(crate::json::encode(&args[0], false))))
         }
@@ -969,13 +1038,15 @@ pub fn method_of(type_name: &str, method: &str) -> Option<Value> {
         "String" => "std.string",
         "Cell" => "Cell",
         "File" => "File",
+        "Listener" => "Listener",
+        "Connection" => "Connection",
         _ => return None,
     };
     builtin(&format!("{module}/{method}"))
 }
 
 /// Native types that own an external resource and must be released.
-pub const RESOURCE_TYPES: &[&str] = &["File"];
+pub const RESOURCE_TYPES: &[&str] = &["File", "Listener", "Connection"];
 
 type FileHandle = RefCell<Option<std::fs::File>>;
 

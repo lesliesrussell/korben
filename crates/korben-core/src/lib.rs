@@ -19,6 +19,7 @@ pub mod manifest;
 pub mod own;
 pub mod pkg;
 pub mod project;
+pub mod scope;
 pub mod types;
 pub mod value;
 

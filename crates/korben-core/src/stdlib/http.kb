@@ -1,0 +1,265 @@
+;;; HTTP/1.1, written in Korben over `std.net`.
+;;;
+;;; Requests and responses are ordinary records, errors are an ordinary enum,
+;;; and routing is ordinary pattern matching — the language describes its own
+;;; protocol handling rather than hiding it behind a native module.
+;;;
+;;; Connections are handled one at a time on the accepting task. Concurrent
+;;; handling arrives with the async runtime; nothing here assumes otherwise.
+
+(module std.http
+  (use std.net :as net)
+  (use std.string :as string))
+
+(pub type Request
+  {method: Keyword
+   path: String
+   query: Map String String
+   headers: Map String String
+   body: String})
+
+(pub type Response
+  {status: Int
+   headers: Map String String
+   body: String})
+
+(pub enum HttpError
+  (BadRequest message: String)
+  (Transport cause: String)
+  (Unsupported detail: String))
+
+;; ------------------------------------------------------------- constructing
+
+;;; A plain-text response.
+(pub fn text [status: Int body: String] -> Response
+  (Response
+    {status status
+     headers {"content-type" "text/plain; charset=utf-8"}
+     body body}))
+
+;;; A JSON response. The body is expected to be encoded already.
+(pub fn json [status: Int body: String] -> Response
+  (Response
+    {status status headers {"content-type" "application/json"} body body}))
+
+;;; The response for a path nothing handled.
+(pub fn not-found [] -> Response
+  (json 404 "{\"error\":\"not found\"}"))
+
+;;; A request built by hand, for testing a handler without a socket.
+(pub fn test-request [method: Keyword path: String] -> Request
+  (let split (path-and-query path))
+  (Request
+    {method method
+     path (get split 0 "/")
+     query (parse-query (get split 1 ""))
+     headers {}
+     body ""}))
+
+;; ----------------------------------------------------------------- parsing
+
+(fn path-and-query [target: String] -> Vec String
+  (match (string.split-once target "?")
+    (Some parts) parts
+    (None) [target ""]))
+
+(fn parse-query [raw: String] -> Map String String
+  (if (empty? raw)
+    {}
+    (reduce (string.split raw "&") {}
+      (fn [collected pair]
+        (match (string.split-once pair "=")
+          (Some parts) (assoc collected (get parts 0 "") (get parts 1 ""))
+          (None) (assoc collected pair ""))))))
+
+(fn parse-headers [lines: Vec String] -> Map String String
+  (reduce lines {}
+    (fn [collected line]
+      (match (string.split-once line ":")
+        (Some parts)
+          (assoc collected
+            (string.lower (string.trim (get parts 0 "")))
+            (string.trim (get parts 1 "")))
+        (None) collected))))
+
+;;; Parse a whole request. The method becomes a keyword so handlers can match
+;;; on `:get` rather than on a string.
+(pub fn parse-request [raw: String] -> Result Request HttpError
+  (match (string.split-once raw "\r\n\r\n")
+    (None) (Err (BadRequest "the request has no header terminator"))
+    (Some parts)
+      (do
+        (let lines (string.split (get parts 0 "") "\r\n"))
+        (let start (string.split (get lines 0 "") " "))
+        (if (< (len start) 2)
+          (Err (BadRequest "the request line is malformed"))
+          (do
+            (let target (path-and-query (get start 1 "/")))
+            (Ok
+              (Request
+                {method (keyword (string.lower (get start 0 "GET")))
+                 path (get target 0 "/")
+                 query (parse-query (get target 1 ""))
+                 headers (parse-headers (rest lines))
+                 body (get parts 1 "")})))))))
+
+;; --------------------------------------------------------------- rendering
+
+(fn status-text [status: Int] -> String
+  (match status
+    200 "OK"
+    201 "Created"
+    204 "No Content"
+    400 "Bad Request"
+    404 "Not Found"
+    405 "Method Not Allowed"
+    500 "Internal Server Error"
+    _ "OK"))
+
+(fn header-lines [headers: Map String String] -> String
+  (reduce (keys headers) ""
+    (fn [rendered name]
+      (str rendered name ": " (get headers name "") "\r\n"))))
+
+;;; Render a response as bytes on the wire. `content-length` is always sent, so
+;;; a client knows where the body ends.
+(pub fn render-response [response: Response] -> String
+  (str
+    "HTTP/1.1 " response.status " " (status-text response.status) "\r\n"
+    (header-lines response.headers)
+    "content-length: " (string.byte-length response.body) "\r\n"
+    "connection: close\r\n"
+    "\r\n"
+    response.body))
+
+;; ------------------------------------------------------------------ reading
+
+(fn content-length [headers: Map String String] -> Int
+  (match (string.parse-int (get headers "content-length" "0"))
+    (Ok value) value
+    (Err _) 0))
+
+(fn read-head [connection: Borrow Connection collected: String] -> String !io
+  (if (contains? collected "\r\n\r\n")
+    collected
+    (match (connection.read)
+      (Err _) collected
+      (Ok chunk) (if (empty? chunk) collected (recur connection (str collected chunk))))))
+
+(fn read-body [connection: Borrow Connection collected: String needed: Int] -> String !io
+  (if (>= (string.byte-length collected) needed)
+    collected
+    (match (connection.read)
+      (Err _) collected
+      (Ok chunk)
+        (if (empty? chunk)
+          collected
+          (recur connection (str collected chunk) needed)))))
+
+;;; Read one complete request from a connection.
+(fn read-request [connection: Borrow Connection] -> String !io
+  (let head (read-head connection ""))
+  (match (string.split-once head "\r\n\r\n")
+    (None) head
+    (Some parts)
+      (do
+        (let headers (parse-headers (rest (string.split (get parts 0 "") "\r\n"))))
+        (let body (read-body connection (get parts 1 "") (content-length headers)))
+        (str (get parts 0 "") "\r\n\r\n" body))))
+
+;; ------------------------------------------------------------------- server
+
+(fn respond [connection: Borrow Connection response: Response] -> Unit !io
+  (match (connection.write (render-response response))
+    (Ok _) nil
+    (Err _) nil))
+
+(fn handle [connection: Connection handler: (-> [Request] Response)] -> Unit !io
+  ;; `with` closes the connection on every exit path, including a failure
+  ;; inside the handler.
+  (with open connection
+    (let raw (read-request open))
+    (let response
+      (match (parse-request raw)
+        (Ok request) (handler request)
+        (Err error) (json 400 (str "{\"error\":\"" (describe error) "\"}"))))
+    (respond open response)))
+
+(fn accept-loop [listener: Listener handler: (-> [Request] Response)] -> Result Unit HttpError !io
+  (match (listener.accept)
+    (Err error) (Err (Transport (str error)))
+    (Ok connection)
+      (do
+        (handle connection handler)
+        (recur listener handler))))
+
+;;; Serve requests until the listener fails.
+;;;
+;;; `address` is a host and port, such as `"127.0.0.1:3000"`. Requests are
+;;; handled one at a time.
+(pub fn serve [address: String handler: (-> [Request] Response)] -> Result Unit HttpError !io
+  (match (net.listen address)
+    (Err error) (Err (Transport (str error)))
+    (Ok listener) (accept-loop listener handler)))
+
+;; ------------------------------------------------------------------- client
+
+(fn split-url [url: String] -> Result (Vec String) HttpError
+  (match (string.split-once url "://")
+    (None) (Err (Unsupported (str "no scheme in " url)))
+    (Some scheme-and-rest)
+      (if (not= (get scheme-and-rest 0 "") "http")
+        (Err (Unsupported "only http:// is supported"))
+        (match (string.split-once (get scheme-and-rest 1 "") "/")
+          (None) (Ok [(get scheme-and-rest 1 "") "/"])
+          (Some parts) (Ok [(get parts 0 "") (str "/" (get parts 1 ""))])))))
+
+(fn with-port [authority: String] -> String
+  (if (contains? authority ":") authority (str authority ":80")))
+
+(fn read-all [connection: Borrow Connection collected: String] -> String !io
+  (match (connection.read)
+    (Err _) collected
+    (Ok chunk) (if (empty? chunk) collected (recur connection (str collected chunk)))))
+
+(fn parse-response [raw: String] -> Result Response HttpError
+  (match (string.split-once raw "\r\n\r\n")
+    (None) (Err (BadRequest "the response has no header terminator"))
+    (Some parts)
+      (do
+        (let lines (string.split (get parts 0 "") "\r\n"))
+        (let start (string.split (get lines 0 "") " "))
+        (match (string.parse-int (get start 1 "0"))
+          (Err _) (Err (BadRequest "the status line is malformed"))
+          (Ok status)
+            (Ok
+              (Response
+                {status status
+                 headers (parse-headers (rest lines))
+                 body (get parts 1 "")}))))))
+
+;;; Fetch a URL. Only `http://` is supported; TLS needs `std.crypto`.
+(pub fn get-url [url: String] -> Result Response HttpError !io
+  (match (split-url url)
+    (Err error) (Err error)
+    (Ok parts)
+      (do
+        (let authority (get parts 0 ""))
+        (let target (get parts 1 "/"))
+        (match (net.connect (with-port authority))
+          (Err error) (Err (Transport (str error)))
+          (Ok connection)
+            (with open connection
+              (let request
+                (str "GET " target " HTTP/1.1\r\nhost: " authority
+                     "\r\nconnection: close\r\n\r\n"))
+              (match (open.write request)
+                (Err error) (Err (Transport (str error)))
+                (Ok _) (parse-response (read-all open ""))))))))
+
+;;; A readable description of a failure.
+(pub fn describe [error: HttpError] -> String
+  (match error
+    (BadRequest message) message
+    (Transport cause) cause
+    (Unsupported detail) detail))

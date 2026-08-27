@@ -4,10 +4,9 @@ A compiled, statically typed, ownership-safe Lisp for native software, with a
 one-command modern developer experience.
 
 `spec.md` is the full language and platform specification. This repository is the
-Rust implementation of it. **This tree implements Milestone A ("Usable core"),
-the native backend and ownership analysis from Milestone C, and parts of
-Milestone B.** See
-[Status](#status) for exactly what does and does not work yet.
+Rust implementation of it. **Every acceptance criterion for v0.1 in
+specification section 28 is met.** See [Status](#status) for what is
+implemented and what is deliberately not.
 
 ```sh
 cargo build --release
@@ -127,6 +126,11 @@ specification's reference example adapted to what exists.
   unify with the nominal types they match, tuple inference for heterogeneous
   vector literals, effect inference (`!io`, `!async`, `!alloc`, `!ffi`,
   `!unsafe`), and `--strict-api` for complete public signatures.
+- **HTTP.** `std.http` is written in Korben over `std.net`: requests and
+  responses are ordinary records, errors an ordinary enum, and routing is
+  ordinary pattern matching. `examples/http.kb` is the specification's section
+  29 reference program. Requests are handled one at a time; concurrent handling
+  needs the async runtime.
 - **C interoperation.** `(ffi/c-library ...)` and `(ffi/c-fn ...)` declare typed
   foreign functions; `korben ffi c <header>` generates them from C prototypes.
   A declaration asserts a contract the compiler cannot verify, so it is an
@@ -135,8 +139,8 @@ specification's reference example adapted to what exists.
   foreign null never becomes a Korben value. `examples/ffi.kb` calls libc.
 - Standard library: `std.core`, `std.string`, `std.math`, `std.io`, `std.fs`,
   `std.json`, `std.log`, `std.time`, `std.process`, `std.test`, `std.syntax`.
-  `fs.open` and `fs.create` return a `File`, a real resource that `with` closes
-  on every exit path.
+  `fs.open` and `fs.create` return a `File`, and `std.net` returns `Listener`
+  and `Connection` — real resources that `with` closes on every exit path.
 
 Inference is deliberately conservative. Where the checker cannot reach a sound
 conclusion it produces an unconstrained type rather than a guess, so a reported
@@ -211,6 +215,8 @@ Implemented:
 - A direct interpreter over the typed AST.
 - Core IR, and a native backend that produces standalone executables.
 - Ownership, move, and borrow analysis with `Drop`-based resource types.
+- `std.net` and `std.http`: a working HTTP/1.1 server and client.
+- Per-module namespaces, so two modules may declare the same name.
 - C FFI: typed declarations, a binding generator, and dynamic library loading
   shared by both execution modes.
 - Dependency resolution, a pinned lockfile with SHA-256 checksums, and
@@ -223,7 +229,9 @@ Not yet implemented, and reported as such rather than stubbed silently:
 
 - **Async runtime and structured concurrency** (Milestone D). `async`, `await`,
   and `task-scope` parse and type-check, and run eagerly on the calling task.
-  Channels, task scopes, and cancellation are not implemented.
+  Channels, task scopes, and cancellation are not implemented, so an HTTP server
+  handles one request at a time. This is the largest remaining gap.
+- **TLS.** `std.http` speaks `http://` only; `https://` needs `std.crypto`.
 - **Lifetime inference.** Ownership tracks moves flow-sensitively and reports
   use-after-move, possible moves across branches, moves inside a loop, cloning a
   resource, exclusive-borrow aliasing, borrows crossing a task boundary, and
@@ -268,6 +276,27 @@ The interpreter bounds recursion with `Interp::max_depth` and reports exceeding
 it as a diagnostic rather than aborting. The executable runs on a large worker
 stack so ordinary recursive code has room.
 
+## Acceptance
+
+Specification section 28 lists what a new user must be able to do before v0.1
+is ready. All ten hold today:
+
+| # | Criterion | Where |
+| --- | --- | --- |
+| 1 | Install one executable | `cargo build --release` produces `korben`, 1.1 MB, no runtime deps |
+| 2 | Create a project with `korben new` | three templates, each checked and tested in CI |
+| 3 | Write a typed HTTP or CLI program | `examples/http.kb`, `examples/tour.kb` |
+| 4 | Run it through `korben dev` with immediate diagnostics | check, test, run in one command |
+| 5 | Format and test with built-in commands | `korben fmt`, `korben test` |
+| 6 | Explore it in a project-aware REPL | `korben repl`, with `:type` |
+| 7 | Produce a native release binary | `korben build --release` |
+| 8 | Consume a C library through a generated binding and safe wrapper | `korben ffi c`, `examples/ffi.kb` |
+| 9 | Readable errors for type, macro, exhaustiveness, and ownership faults | `examples/ownership.kb` |
+| 10 | Reproduce the build from a lockfile without install scripts | `korben.lock`, `korben audit` |
+
+What that does *not* mean is that the specification is finished: the async
+runtime, a package registry, TLS, and the language server are all still ahead.
+
 ## Repository layout
 
 ```text
@@ -290,8 +319,8 @@ native builds reproducible and offline.
 ## Development
 
 ```sh
-cargo test              # 173 tests: reader, formatter, evaluator, checker,
-                        # ownership, FFI, packaging, CLI, and
+cargo test              # 185 tests: reader, formatter, evaluator, checker,
+                        # ownership, FFI, HTTP, packaging, CLI, and
                         # interpreter-vs-native differential tests
 cargo clippy --workspace --all-targets
 cargo fmt

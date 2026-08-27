@@ -18,6 +18,7 @@ use std::rc::Rc;
 /// Analyze every loaded module.
 pub fn check_session(session: &mut Session, strict_api: bool) {
     let mut checker = Checker::new(strict_api);
+    checker.namespace = crate::scope::Namespace::build(&session.modules);
     // Nominal declarations across all modules are visible to the checker; the
     // module system already rejected anything that is not actually in scope.
     for module in &session.modules {
@@ -42,6 +43,9 @@ pub fn check_session(session: &mut Session, strict_api: bool) {
 /// Used by the REPL's `:type` command and by editor hover.
 pub fn type_of(session: &Session, expr: &Expr) -> String {
     let mut checker = Checker::new(false);
+    checker.namespace = crate::scope::Namespace::build(&session.modules);
+    // The REPL types expressions as if written in the entry module.
+    checker.module = session.modules.last().map(|module| module.name.clone()).unwrap_or_default();
     for module in &session.modules {
         checker.collect_types(module);
     }
@@ -167,6 +171,10 @@ struct Checker {
     effects: Effects,
     /// Known type names, for `unknown type` diagnostics.
     known_types: HashSet<String>,
+    /// Which local name refers to which declaration, per module.
+    namespace: crate::scope::Namespace,
+    /// The module being checked.
+    module: String,
 }
 
 impl Checker {
@@ -183,6 +191,8 @@ impl Checker {
             globals: HashMap::new(),
             effects: Effects::NONE,
             known_types: builtin_type_names(),
+            namespace: crate::scope::Namespace::default(),
+            module: String::new(),
         };
         checker.install_builtin_enums();
         checker.install_prelude_signatures();
@@ -221,6 +231,7 @@ impl Checker {
                 ret: self.resolve(&function.ret),
                 effects: function.effects,
                 variadic: function.variadic,
+                keywords: function.keywords.clone(),
             })),
             Type::Record(record) => Type::Record(Rc::new(RecordType {
                 name: record.name.clone(),
@@ -256,6 +267,9 @@ impl Checker {
             // `Never` is the type of an expression that does not return, so it
             // is compatible with every branch it appears in.
             (Type::Con(name, _), _) | (_, Type::Con(name, _)) if &**name == "Never" => Ok(()),
+            // A variable unified with itself is already solved; the occurs
+            // check would otherwise reject it.
+            (Type::Var(left_var), Type::Var(right_var)) if left_var == right_var => Ok(()),
             (Type::Var(var), _) => {
                 if self.occurs(*var, &right) {
                     return Err((left.clone(), right.clone()));
@@ -570,6 +584,10 @@ impl Checker {
             );
         }
         define(
+            "keyword",
+            Scheme::mono(Type::function(vec![Type::string()], Type::keyword(), Effects::NONE)),
+        );
+        define(
             "str",
             Scheme {
                 vars: vec![0],
@@ -600,17 +618,19 @@ impl Checker {
     }
 
     fn collect_types(&mut self, module: &Module) {
+        self.module = module.name.clone();
         for item in &module.items {
             let Item::Type(decl) = item else { continue };
+            let qualified = crate::scope::qualify(&module.name, &decl.name);
             self.known_types.insert(decl.name.clone());
-            self.type_params.insert(decl.name.clone(), decl.params.clone());
+            self.type_params.insert(qualified.clone(), decl.params.clone());
             match &decl.body {
                 TypeBody::Record(fields) => {
                     let mut table = BTreeMap::new();
                     for (name, ty, _) in fields {
                         table.insert(name.clone(), self.lower_type(ty, &decl.params));
                     }
-                    self.records.insert(decl.name.clone(), FieldTable { fields: table });
+                    self.records.insert(qualified.clone(), FieldTable { fields: table });
                 }
                 TypeBody::Enum(variants) => {
                     let mut entries = Vec::new();
@@ -620,15 +640,18 @@ impl Checker {
                             .iter()
                             .map(|(name, ty, _)| (name.clone(), self.lower_type(ty, &decl.params)))
                             .collect();
-                        self.variant_owner.insert(variant.name.clone(), decl.name.clone());
+                        self.variant_owner.insert(
+                            crate::scope::qualify(&module.name, &variant.name),
+                            qualified.clone(),
+                        );
                         entries.push((variant.name.clone(), fields));
                     }
-                    self.enums.insert(decl.name.clone(), EnumTable { variants: entries });
+                    self.enums.insert(qualified.clone(), EnumTable { variants: entries });
                 }
                 TypeBody::Newtype(inner) => {
                     let mut table = BTreeMap::new();
                     table.insert("value".to_string(), self.lower_type(inner, &decl.params));
-                    self.records.insert(decl.name.clone(), FieldTable { fields: table });
+                    self.records.insert(qualified.clone(), FieldTable { fields: table });
                 }
                 TypeBody::Alias(_) => {}
             }
@@ -636,11 +659,12 @@ impl Checker {
     }
 
     fn collect_signatures(&mut self, module: &Module) {
+        self.module = module.name.clone();
         for item in &module.items {
             match item {
                 Item::Fn(decl) => {
                     let scheme = self.signature_of(decl);
-                    self.globals.insert(decl.name.clone(), scheme);
+                    self.globals.insert(crate::scope::qualify(&module.name, &decl.name), scheme);
                 }
                 Item::Type(decl) => self.register_constructors(decl),
                 Item::Protocol(decl) => {
@@ -653,7 +677,7 @@ impl Checker {
                             .map(|ty| self.lower_type(ty, &[]))
                             .unwrap_or(Type::Unknown);
                         self.globals.insert(
-                            method.name.clone(),
+                            crate::scope::qualify(&module.name, &method.name),
                             Scheme::mono(Type::function(params, ret, method.effects)),
                         );
                     }
@@ -661,7 +685,8 @@ impl Checker {
                 Item::Const { name, ty, .. } => {
                     let ty =
                         ty.as_ref().map(|ty| self.lower_type(ty, &[])).unwrap_or(Type::Unknown);
-                    self.globals.insert(name.clone(), Scheme::mono(ty));
+                    self.globals
+                        .insert(crate::scope::qualify(&module.name, name), Scheme::mono(ty));
                 }
                 // A foreign declaration is an unsafe function that performs a
                 // foreign call, so its signature carries both effects.
@@ -676,7 +701,7 @@ impl Checker {
                         .collect();
                     let ret = self.lower_type(&decl.ret, &[]);
                     self.globals.insert(
-                        decl.name.clone(),
+                        crate::scope::qualify(&module.name, &decl.name),
                         Scheme::mono(Type::function(
                             params,
                             ret,
@@ -691,21 +716,22 @@ impl Checker {
 
     fn register_constructors(&mut self, decl: &Rc<TypeDecl>) {
         let params = decl.params.clone();
+        let qualified = crate::scope::qualify(&self.module, &decl.name);
         let result =
-            Type::Con(Rc::from(decl.name.as_str()), params.iter().map(|_| Type::Unknown).collect());
+            Type::Con(Rc::from(qualified.as_str()), params.iter().map(|_| Type::Unknown).collect());
         match &decl.body {
             TypeBody::Record(fields) => {
                 let param_types: Vec<Type> =
                     fields.iter().map(|(_, ty, _)| self.lower_type(ty, &params)).collect();
                 self.globals.insert(
-                    decl.name.clone(),
+                    qualified.clone(),
                     Scheme::mono(Type::function(param_types, result, Effects::NONE)),
                 );
             }
             TypeBody::Newtype(inner) => {
                 let inner = self.lower_type(inner, &params);
                 self.globals.insert(
-                    decl.name.clone(),
+                    qualified.clone(),
                     Scheme::mono(Type::function(vec![inner], result, Effects::NONE)),
                 );
             }
@@ -721,7 +747,7 @@ impl Checker {
                     } else {
                         Scheme::mono(Type::function(param_types, result.clone(), Effects::NONE))
                     };
-                    self.globals.insert(variant.name.clone(), scheme);
+                    self.globals.insert(crate::scope::qualify(&self.module, &variant.name), scheme);
                 }
             }
             TypeBody::Alias(_) => {}
@@ -744,7 +770,8 @@ impl Checker {
             Some(ty) => self.lower_type(ty, &[]),
             None => Type::Unknown,
         };
-        Scheme::mono(Type::function(params, ret, decl.declared_effects))
+        let keywords = decl.params.iter().filter_map(|param| param.keyword.clone()).collect();
+        Scheme::mono(Type::with_keywords(params, ret, decl.declared_effects, keywords))
     }
 
     /// Translate surface type syntax into an inference type.
@@ -757,10 +784,18 @@ impl Checker {
                 }
                 let args: Vec<Type> = args.iter().map(|arg| self.lower_type(arg, params)).collect();
                 let short = name.rsplit(['.', '/']).next().unwrap_or(name).to_string();
-                if !self.known_types.contains(&short)
-                    && !self.records.contains_key(&short)
-                    && !self.enums.contains_key(&short)
-                {
+                // A type declared in this module, or imported into it.
+                if let Some(qualified) = self.namespace.ty(&self.module, &short) {
+                    return Type::Con(Rc::from(qualified), args);
+                }
+                // A type reached through an import alias, as in `http.Request`.
+                if let Some((alias, rest)) = name.split_once('.') {
+                    if let Some(qualified) = self.namespace.type_through(&self.module, alias, rest)
+                    {
+                        return Type::Con(Rc::from(qualified), args);
+                    }
+                }
+                if !self.known_types.contains(&short) {
                     // Unknown names are reported once, then treated as opaque.
                     self.diagnostics.push(
                         Diagnostic::warning(format!("unknown type `{name}`"))
@@ -796,6 +831,7 @@ impl Checker {
     // -------------------------------------------------------------- checking
 
     fn check_module(&mut self, module: &Module) {
+        self.module = module.name.clone();
         for item in &module.items {
             match item {
                 Item::Fn(decl) => self.check_fn(decl),
@@ -964,8 +1000,7 @@ impl Checker {
             }
             Expr::Keyword(_, _) => Type::keyword(),
             Expr::Var(name, span) => self.lookup(name, *span, scope),
-            // Cross-module references are checked by the module system, not here.
-            Expr::Path { .. } => Type::Unknown,
+            Expr::Path { module, name, .. } => self.through(module, name),
             Expr::Vector(items, _) => {
                 // A literal whose elements agree is a `Vec`; one whose elements
                 // differ is a fixed-length tuple, per specification 9.5.
@@ -1058,6 +1093,14 @@ impl Checker {
             }
             Expr::Call { callee, args, span } => self.infer_call(callee, args, *span, scope),
             Expr::Field { target, name, span } => {
+                // `alias.name` is a module member unless `alias` is a binding.
+                if let Expr::Var(root, _) = &**target {
+                    if scope.lookup(root).is_none()
+                        && self.namespace.module_of(&self.module, root).is_some()
+                    {
+                        return self.through(root, name);
+                    }
+                }
                 let target_type = self.infer(target, scope);
                 self.field_type(&target_type, name, *span)
             }
@@ -1175,7 +1218,13 @@ impl Checker {
         // `(User { id .. name .. })` constructs by field name rather than
         // position, so check it against the declaration directly.
         if let Expr::Var(name, _) = callee {
-            if self.records.contains_key(name) && args.len() == 1 && args[0].keyword.is_none() {
+            let record = self
+                .namespace
+                .value(&self.module, name)
+                .map(str::to_string)
+                .filter(|qualified| self.records.contains_key(qualified));
+            if let Some(name) = record.filter(|_| args.len() == 1 && args[0].keyword.is_none()) {
+                let name = name.as_str();
                 if let Expr::Record { fields, span: record_span, .. } = &args[0].value {
                     let expected = self.records[name].fields.clone();
                     let mut seen = HashSet::new();
@@ -1215,7 +1264,7 @@ impl Checker {
                             .at(*record_span, format!("not supplied: {}", missing.join(", "))),
                         );
                     }
-                    return Type::Con(Rc::from(name.as_str()), Vec::new());
+                    return Type::Con(Rc::from(name), Vec::new());
                 }
             }
         }
@@ -1227,10 +1276,18 @@ impl Checker {
         match self.prune(&callee_type) {
             Type::Fn(function) => {
                 self.effects = self.effects.union(function.effects);
-                // Named arguments are matched by the callee's declaration, which
-                // the type language does not carry; only check positional shape.
-                let positional: Vec<_> =
-                    arg_types.iter().filter(|(arg, _)| arg.keyword.is_none()).collect();
+                // A keyword argument binds by name only when the callee declares
+                // that keyword. Otherwise it passes through positionally as a
+                // keyword literal and its value, exactly as the runtime does.
+                let arg_types: Vec<(&Arg, Type)> = arg_types
+                    .into_iter()
+                    .flat_map(|(arg, ty)| match &arg.keyword {
+                        Some(keyword) if function.keywords.contains(keyword) => vec![],
+                        Some(_) => vec![(arg, Type::keyword()), (arg, ty)],
+                        None => vec![(arg, ty)],
+                    })
+                    .collect();
+                let positional: Vec<_> = arg_types.iter().collect();
                 let arity_ok = if function.variadic {
                     arg_types.len() >= function.params.len()
                 } else {
@@ -1278,6 +1335,18 @@ impl Checker {
                 );
                 Type::Unknown
             }
+        }
+    }
+
+    /// A value reached through an import alias.
+    fn through(&mut self, alias: &str, name: &str) -> Type {
+        match self.namespace.through(&self.module, alias, name) {
+            Some(qualified) => match self.globals.get(qualified).cloned() {
+                Some(scheme) => self.instantiate(&scheme),
+                None => Type::Unknown,
+            },
+            // A native standard-library module has no declarations to consult.
+            None => Type::Unknown,
         }
     }
 
@@ -1342,6 +1411,13 @@ impl Checker {
         if let Some(scheme) = scope.lookup(name) {
             return self.instantiate(&scheme);
         }
+        // A module-level name means whatever this module says it means.
+        if let Some(qualified) = self.namespace.value(&self.module, name) {
+            if let Some(scheme) = self.globals.get(qualified).cloned() {
+                return self.instantiate(&scheme);
+            }
+        }
+        // Otherwise it is a prelude function, which every module sees.
         if let Some(scheme) = self.globals.get(name).cloned() {
             return self.instantiate(&scheme);
         }
@@ -1392,7 +1468,12 @@ impl Checker {
                 self.bind_pattern(inner, &expected, scope);
             }
             Pattern::Variant { name, positional, named, span } => {
-                let Some(owner) = self.variant_owner.get(name).cloned() else {
+                let qualified = self
+                    .namespace
+                    .value(&self.module, name)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| name.clone());
+                let Some(owner) = self.variant_owner.get(&qualified).cloned() else {
                     // An unknown constructor is reported once, by the evaluator.
                     for sub in positional {
                         self.bind_pattern(sub, &Type::Unknown, scope);
@@ -1529,6 +1610,7 @@ fn substitute(ty: &Type, mapping: &HashMap<TypeVar, Type>) -> Type {
             ret: substitute(&function.ret, mapping),
             effects: function.effects,
             variadic: function.variadic,
+            keywords: function.keywords.clone(),
         })),
         Type::Record(record) => Type::Record(Rc::new(RecordType {
             name: record.name.clone(),
@@ -1575,6 +1657,8 @@ fn builtin_type_names() -> HashSet<String> {
         "Bool",
         "Char",
         "String",
+        "Listener",
+        "Connection",
         "Bytes",
         "Unit",
         "Never",

@@ -11,6 +11,7 @@ pub mod apply;
 pub mod ffi;
 pub mod json;
 pub mod loc;
+pub mod net;
 pub mod std;
 pub mod value;
 
