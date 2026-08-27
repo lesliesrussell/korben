@@ -33,6 +33,22 @@ impl TomlValue {
     }
 }
 
+/// One declared dependency.
+#[derive(Clone, Debug)]
+pub struct Dependency {
+    pub name: String,
+    /// The version requirement as written, e.g. `^0.1`.
+    pub requirement: String,
+    /// A directory relative to this manifest, for a path dependency.
+    pub path: Option<String>,
+    pub dev: bool,
+}
+
+/// Manifest keys that would run code at install time. Specification 21.3
+/// prohibits install scripts, so these are rejected rather than ignored.
+const FORBIDDEN_KEYS: &[&str] =
+    &["install", "preinstall", "postinstall", "script", "scripts", "prepare"];
+
 #[derive(Clone, Debug, Default)]
 pub struct Manifest {
     pub name: String,
@@ -44,9 +60,10 @@ pub struct Manifest {
     pub main: String,
     pub opt_level: i64,
     pub target: String,
-    /// `[dependencies]` and `[dev-dependencies]` as name to version requirement.
-    pub dependencies: BTreeMap<String, String>,
-    pub dev_dependencies: BTreeMap<String, String>,
+    pub dependencies: Vec<Dependency>,
+    pub dev_dependencies: Vec<Dependency>,
+    /// `[registry] path = "..."` — where registry dependencies are looked up.
+    pub registry: Option<String>,
     /// Capabilities build scripts and macros are granted.
     pub build_capabilities: Vec<String>,
     /// `[ffi] c = [...]` — C libraries this package links against.
@@ -67,8 +84,9 @@ impl Manifest {
             main: "main".to_string(),
             opt_level: 2,
             target: "native".to_string(),
-            dependencies: BTreeMap::new(),
-            dev_dependencies: BTreeMap::new(),
+            dependencies: Vec::new(),
+            dev_dependencies: Vec::new(),
+            registry: None,
             build_capabilities: Vec::new(),
             ffi_c: Vec::new(),
             ffi_rust: Vec::new(),
@@ -125,19 +143,85 @@ impl Manifest {
                 }
             }
         }
-        for (section, target) in [
-            ("dependencies", &mut manifest.dependencies),
-            ("dev-dependencies", &mut manifest.dev_dependencies),
-        ] {
+        if let Some(registry) = tables.get("registry") {
+            manifest.registry =
+                registry.get("path").and_then(TomlValue::as_str).map(str::to_string);
+        }
+
+        // Install scripts are prohibited, so a manifest that declares one is
+        // rejected outright rather than having the key quietly ignored.
+        for (section, table) in &tables {
+            for key in table.keys() {
+                if FORBIDDEN_KEYS.contains(&key.as_str()) {
+                    let where_ = if section.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" in `[{section}]`")
+                    };
+                    return Err(format!(
+                        "`{key}`{where_} would run code at install time, which is not allowed\n  specification 21.3: install scripts are prohibited by default"
+                    ));
+                }
+            }
+            if FORBIDDEN_KEYS.contains(&section.as_str()) {
+                return Err(format!(
+                    "`[{section}]` would run code at install time, which is not allowed\n  specification 21.3: install scripts are prohibited by default"
+                ));
+            }
+        }
+
+        for (section, dev) in [("dependencies", false), ("dev-dependencies", true)] {
+            // The short form: `name = "^0.1"`.
             if let Some(table) = tables.get(section) {
                 for (key, value) in table {
                     if let Some(text) = value.as_str() {
-                        target.insert(key.clone(), text.to_string());
+                        manifest.dependency_mut(dev).push(Dependency {
+                            name: key.clone(),
+                            requirement: text.to_string(),
+                            path: None,
+                            dev,
+                        });
                     }
                 }
             }
+            // The long form: `[dependencies.name]` with `version` and `path`.
+            let prefix = format!("{section}.");
+            for (heading, table) in &tables {
+                let Some(name) = heading.strip_prefix(&prefix) else { continue };
+                let path = table.get("path").and_then(TomlValue::as_str).map(str::to_string);
+                let requirement = table
+                    .get("version")
+                    .and_then(TomlValue::as_str)
+                    .map(str::to_string)
+                    // A path dependency without a version accepts whatever is there.
+                    .unwrap_or_else(|| "*".to_string());
+                manifest.dependency_mut(dev).push(Dependency {
+                    name: name.to_string(),
+                    requirement,
+                    path,
+                    dev,
+                });
+            }
         }
+        manifest.dependencies.sort_by(|left, right| left.name.cmp(&right.name));
+        manifest.dev_dependencies.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(manifest)
+    }
+
+    fn dependency_mut(&mut self, dev: bool) -> &mut Vec<Dependency> {
+        if dev {
+            &mut self.dev_dependencies
+        } else {
+            &mut self.dependencies
+        }
+    }
+
+    /// Look up a declared dependency by name.
+    pub fn dependency(&self, name: &str) -> Option<&Dependency> {
+        self.dependencies
+            .iter()
+            .chain(&self.dev_dependencies)
+            .find(|dependency| dependency.name == name)
     }
 
     pub fn load(path: &Path) -> Result<Manifest, String> {
@@ -160,13 +244,9 @@ impl Manifest {
         }
         out.push_str(&format!("main = \"{}\"\n", self.main));
         out.push_str("\n[dependencies]\n");
-        for (name, requirement) in &self.dependencies {
-            out.push_str(&format!("{name} = \"{requirement}\"\n"));
-        }
+        out.push_str(&render_dependencies(&self.dependencies));
         out.push_str("\n[dev-dependencies]\n");
-        for (name, requirement) in &self.dev_dependencies {
-            out.push_str(&format!("{name} = \"{requirement}\"\n"));
-        }
+        out.push_str(&render_dependencies(&self.dev_dependencies));
         if !self.ffi_c.is_empty() || !self.ffi_rust.is_empty() {
             out.push_str("\n[ffi]\n");
             if !self.ffi_c.is_empty() {
@@ -183,13 +263,43 @@ impl Manifest {
     }
 }
 
+/// Render dependencies, using the long form only where it is needed.
+fn render_dependencies(dependencies: &[Dependency]) -> String {
+    let mut out = String::new();
+    let mut long = Vec::new();
+    for dependency in dependencies {
+        match &dependency.path {
+            None => {
+                out.push_str(&format!("{} = \"{}\"\n", dependency.name, dependency.requirement))
+            }
+            Some(_) => long.push(dependency),
+        }
+    }
+    let section = if dependencies.first().map(|entry| entry.dev).unwrap_or(false) {
+        "dev-dependencies"
+    } else {
+        "dependencies"
+    };
+    for dependency in long {
+        out.push_str(&format!("\n[{section}.{}]\n", dependency.name));
+        if dependency.requirement != "*" {
+            out.push_str(&format!("version = \"{}\"\n", dependency.requirement));
+        }
+        if let Some(path) = &dependency.path {
+            out.push_str(&format!("path = \"{path}\"\n"));
+        }
+    }
+    out
+}
+
 fn render_list(items: &[String]) -> String {
     items.iter().map(|item| format!("\"{item}\"")).collect::<Vec<_>>().join(", ")
 }
 
-type Table = BTreeMap<String, TomlValue>;
+pub type Table = BTreeMap<String, TomlValue>;
 
-fn parse_tables(text: &str) -> Result<BTreeMap<String, Table>, String> {
+/// Parse a TOML subset into its tables, keyed by dotted section name.
+pub fn parse_tables(text: &str) -> Result<BTreeMap<String, Table>, String> {
     let mut tables: BTreeMap<String, Table> = BTreeMap::new();
     let mut current = String::new();
     tables.insert(current.clone(), Table::new());

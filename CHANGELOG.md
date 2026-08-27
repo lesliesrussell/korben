@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.5.0 — Dependencies and reproducible builds
+
+A build now reproduces from `korben.lock`, closing v0.1 acceptance
+criterion 10.
+
+### Added
+
+- **Dependency declarations** with semantic version requirements, in short form
+  (`json = "^0.1"`) or long form with a source
+  (`[dependencies.json] path = "../json"`). Sources are a directory on this
+  machine, or a package in a registry directory laid out as
+  `<registry>/<name>/<version>/`.
+- **Deterministic resolution.** Every requirement on a name is collected and the
+  highest version satisfying all of them is chosen. Resolution is a fixpoint, so
+  a requirement discovered deep in the graph can narrow a choice made earlier
+  and the result does not depend on declaration order. A conflict names every
+  requirement, who made it, and what versions exist.
+- **`korben.lock`**, fully pinned: version, source identity, SHA-256 content
+  checksum, and resolved edges. When the lock describes the manifest, resolution
+  does not run — locked versions are used verbatim and checksums are verified,
+  so a dependency that changed underneath the lock is an error.
+- **SHA-256** in the toolchain, verified against the FIPS 180-4 vectors.
+- **Cross-package modules.** A dependency's modules are importable under the
+  names they declare, and only by packages that declare the dependency.
+- **`korben add`, `remove`, `update`, and `audit`.** `audit` verifies lockfile
+  integrity and checksums, and reports package metadata gaps, local-path
+  dependencies that make a lock unportable, and weakened verification settings.
+- An `[registry] path` manifest key and a `KORBEN_REGISTRY` override.
+
+### Changed
+
+- **Install scripts are prohibited outright.** A manifest declaring `install`,
+  `preinstall`, `postinstall`, `prepare`, `script`, or a `[scripts]` table is
+  rejected rather than having the key quietly ignored.
+- `korben doctor` reports dependency count, lockfile presence, and whether
+  `KORBEN_SKIP_CHECKSUMS` has disabled verification.
+- A module that cannot be found and looks like a package name suggests
+  `korben add`, and is reported once rather than once per attempt.
+
+### Not in this release
+
+A network registry, publishing, package signing, git dependencies, workspaces,
+and sandboxed build scripts.
+
 ## 0.4.0 — C interoperation
 
 `korben check` and `korben run` can now consume a C library through a

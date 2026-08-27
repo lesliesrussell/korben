@@ -41,8 +41,18 @@ pub struct Session {
     pub modules: Vec<Module>,
     pub root: PathBuf,
     pub manifest: Manifest,
+    /// The pinned dependency graph this session is building against.
+    pub resolution: crate::pkg::Resolution,
+    /// True when the lockfile was regenerated rather than reproduced.
+    pub lock_written: bool,
+    /// Which packages each package may import from.
+    visibility: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    /// Which package each loaded module came from.
+    module_package: HashMap<String, String>,
     loaded: HashSet<String>,
     loading: Vec<String>,
+    /// Modules already reported as missing, so one bad import is one error.
+    missing: HashSet<String>,
 }
 
 impl Session {
@@ -56,8 +66,13 @@ impl Session {
             modules: Vec::new(),
             root,
             manifest,
+            resolution: crate::pkg::Resolution::default(),
+            lock_written: false,
+            visibility: std::collections::BTreeMap::new(),
+            module_package: HashMap::new(),
             loaded: HashSet::new(),
             loading: Vec::new(),
+            missing: HashSet::new(),
         };
         session.load_prelude();
         session
@@ -77,11 +92,57 @@ impl Session {
             modules: Vec::new(),
             root,
             manifest,
+            resolution: crate::pkg::Resolution::default(),
+            lock_written: false,
+            visibility: std::collections::BTreeMap::new(),
+            module_package: HashMap::new(),
             loaded: HashSet::new(),
             loading: Vec::new(),
+            missing: HashSet::new(),
         };
         session.load_prelude();
+        session.prepare_dependencies()?;
         Ok(session)
+    }
+
+    /// Pin the dependency graph.
+    ///
+    /// When `korben.lock` is present and still describes the manifest, it is
+    /// used verbatim and every checksum is verified: that is the reproducible
+    /// path, and resolution does not run. Otherwise the graph is resolved and
+    /// the lock is written.
+    fn prepare_dependencies(&mut self) -> Result<(), String> {
+        use crate::pkg::{resolve, Lockfile, LOCK_NAME};
+        let declared =
+            !self.manifest.dependencies.is_empty() || !self.manifest.dev_dependencies.is_empty();
+        let lock_path = self.root.join(LOCK_NAME);
+
+        if lock_path.is_file() {
+            let lock = Lockfile::load(&lock_path)?;
+            if lock.matches(&self.manifest) {
+                self.resolution = lock.materialize(&self.root, &self.manifest)?;
+                self.visibility = crate::pkg::visibility(&self.manifest, &self.resolution);
+                return Ok(());
+            }
+        }
+        if !declared {
+            // Nothing to pin, so no lockfile is written.
+            self.visibility = crate::pkg::visibility(&self.manifest, &self.resolution);
+            return Ok(());
+        }
+
+        self.resolution = resolve(&self.root, &self.manifest)?;
+        let lock = Lockfile::from_resolution(&self.manifest, &self.resolution);
+        std::fs::write(&lock_path, lock.render())
+            .map_err(|error| format!("cannot write {}: {error}", lock_path.display()))?;
+        self.lock_written = true;
+        self.visibility = crate::pkg::visibility(&self.manifest, &self.resolution);
+        Ok(())
+    }
+
+    /// The package a loaded module belongs to.
+    pub fn package_of(&self, module: &str) -> &str {
+        self.module_package.get(module).map(String::as_str).unwrap_or(&self.manifest.name)
     }
 
     fn load_prelude(&mut self) {
@@ -110,14 +171,26 @@ impl Session {
     }
 
     /// Map a module path such as `app.main` to a file on disk.
-    pub fn module_path(&self, name: &str) -> Option<PathBuf> {
+    ///
+    /// The root package is searched first, then each resolved dependency, so a
+    /// dependency's modules are importable under the names they declare.
+    pub fn module_path(&self, name: &str) -> Option<(PathBuf, String)> {
         let relative = name.replace('.', "/");
-        [
-            self.src_dir().join(format!("{relative}.{SOURCE_EXTENSION}")),
-            self.src_dir().join(&relative).join(format!("mod.{SOURCE_EXTENSION}")),
-        ]
-        .into_iter()
-        .find(|candidate| candidate.is_file())
+        let mut roots: Vec<(PathBuf, String)> = vec![(self.src_dir(), self.manifest.name.clone())];
+        for package in &self.resolution.packages {
+            roots.push((package.root.join("src"), package.name.clone()));
+        }
+        for (src, package) in roots {
+            for candidate in [
+                src.join(format!("{relative}.{SOURCE_EXTENSION}")),
+                src.join(&relative).join(format!("mod.{SOURCE_EXTENSION}")),
+            ] {
+                if candidate.is_file() {
+                    return Some((candidate, package));
+                }
+            }
+        }
+        None
     }
 
     /// Load a module by name, loading its imports first.
@@ -139,15 +212,27 @@ impl Session {
             );
             return Err(());
         }
-        let Some(path) = self.module_path(name) else {
-            self.diagnostics.push(
-                Diagnostic::error(format!("cannot find module `{name}`"))
-                    .with_code("module-not-found")
-                    .at(span, "no source file for this module")
-                    .help(format!("expected `src/{}.{SOURCE_EXTENSION}`", name.replace('.', "/"))),
-            );
+        let Some((path, package)) = self.module_path(name) else {
+            // One bad import is one error, however many times it is reached.
+            if self.missing.insert(name.to_string()) {
+                // A dotless name looks like a package, so suggest declaring it.
+                let help = if name.contains('.') {
+                    format!("expected `src/{}.{SOURCE_EXTENSION}`", name.replace('.', "/"))
+                } else {
+                    format!(
+                        "expected `src/{name}.{SOURCE_EXTENSION}`, or declare the package with `korben add {name}`"
+                    )
+                };
+                self.diagnostics.push(
+                    Diagnostic::error(format!("cannot find module `{name}`"))
+                        .with_code("module-not-found")
+                        .at(span, "no source file for this module")
+                        .help(help),
+                );
+            }
             return Err(());
         };
+        self.module_package.insert(name.to_string(), package);
         self.load_file(&path, Some(name.to_string()))
     }
 
@@ -241,6 +326,22 @@ impl Session {
     fn wire_imports(&mut self, module: &Module, runtime: &Rc<ModuleRuntime>) {
         for import in &module.imports {
             if self.load_module(&import.path, import.span).is_err() {
+                continue;
+            }
+            if !self.import_is_declared(&module.name, &import.path) {
+                let importer = self.package_of(&module.name).to_string();
+                let provider = self.package_of(&import.path).to_string();
+                self.diagnostics.push(
+                    Diagnostic::error(format!(
+                        "`{importer}` does not declare a dependency on `{provider}`"
+                    ))
+                    .with_code("undeclared-dependency")
+                    .at(
+                        import.span,
+                        format!("module `{}` comes from package `{provider}`", import.path),
+                    )
+                    .help(format!("add it with `korben add {provider}`")),
+                );
                 continue;
             }
             runtime.aliases.borrow_mut().insert(import.alias.clone(), import.path.clone());
@@ -517,6 +618,20 @@ impl Session {
             }
         }
         last.ok_or(())
+    }
+
+    /// Whether the importing module's package may import from the provider.
+    fn import_is_declared(&self, importer_module: &str, imported: &str) -> bool {
+        // The standard library is always available.
+        if imported.starts_with("std.") || !self.module_package.contains_key(imported) {
+            return true;
+        }
+        let importer = self.package_of(importer_module);
+        let provider = self.package_of(imported);
+        if importer == provider {
+            return true;
+        }
+        self.visibility.get(importer).map(|allowed| allowed.contains(provider)).unwrap_or(false)
     }
 
     /// Register a module's declarations into an already-loaded runtime module.

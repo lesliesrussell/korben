@@ -32,8 +32,11 @@ capabilities = ["fs", "net"]
     assert_eq!(manifest.version, "0.1.0");
     assert_eq!(manifest.edition, "2026");
     assert_eq!(manifest.description.as_deref(), Some("Example Korben service"));
-    assert_eq!(manifest.dependencies.get("http").map(String::as_str), Some("^0.1"));
-    assert_eq!(manifest.dev_dependencies.get("testkit").map(String::as_str), Some("^0.1"));
+    assert_eq!(manifest.dependency("http").map(|entry| entry.requirement.as_str()), Some("^0.1"));
+    assert_eq!(
+        manifest.dependency("testkit").map(|entry| entry.requirement.as_str()),
+        Some("^0.1")
+    );
     assert_eq!(manifest.opt_level, 2);
     assert_eq!(manifest.build_capabilities, vec!["fs", "net"]);
 }
@@ -47,11 +50,16 @@ fn a_manifest_without_a_name_is_rejected() {
 fn rendered_manifests_round_trip() {
     let mut manifest = Manifest::default_for("demo");
     manifest.license = Some("MIT".to_string());
-    manifest.dependencies.insert("http".to_string(), "^0.1".to_string());
+    manifest.dependencies.push(korben_core::manifest::Dependency {
+        name: "http".to_string(),
+        requirement: "^0.1".to_string(),
+        path: None,
+        dev: false,
+    });
     let reparsed = Manifest::parse(&manifest.render(), None).expect("round trip");
     assert_eq!(reparsed.name, "demo");
     assert_eq!(reparsed.license.as_deref(), Some("MIT"));
-    assert_eq!(reparsed.dependencies.get("http").map(String::as_str), Some("^0.1"));
+    assert_eq!(reparsed.dependency("http").map(|entry| entry.requirement.as_str()), Some("^0.1"));
 }
 
 #[test]

@@ -36,6 +36,10 @@ One executable covers the standard workflow. Every command works on a project
 | `korben doc [--out <dir>]` | Markdown docs plus a machine-readable `api.json` |
 | `korben inspect` | The resolved project model |
 | `korben ffi [c <header>]` | List or generate foreign bindings |
+| `korben add <name> [--version <req>] [--path <dir>] [--dev]` | Declare a dependency |
+| `korben remove <name>` | Drop a dependency |
+| `korben update` | Re-resolve and rewrite the lockfile |
+| `korben audit` | Verify the lockfile, checksums, and package metadata |
 | `korben doctor` | Toolchain and project health |
 | `korben build [--release] [--emit ir\|rust]` | Compile to a native executable |
 
@@ -155,6 +159,49 @@ error[use-after-move]: `file` was moved and cannot be used again
   help: pass it by `Borrow`, or restructure so the value is used before it moves
 ```
 
+## Dependencies and reproducible builds
+
+Dependencies are declared with semantic version requirements, resolved
+deterministically, and pinned in `korben.lock`.
+
+```sh
+korben add json --version "^0.2"      # from a registry directory
+korben add shout --path ../shout      # from a directory on this machine
+korben update                          # re-resolve and re-pin
+korben audit                           # verify the lock and its checksums
+```
+
+When the lockfile is present and still describes the manifest, **resolution
+does not run**: the locked versions are used verbatim and every SHA-256
+checksum is verified. A dependency that changed underneath the lock is an
+error, not a silent difference.
+
+```
+error: dependency `shout` has changed since it was locked
+  locked:  sha256:efcacd0439edcbb656ce6880e30e310c3973f5b8dd68db3477f94412faa0086f
+  found:   sha256:a472672f20a3779d128b1e82168d49f8980aa693416eecf217e5fa1d84b44a39
+  run `korben update` to accept the change
+```
+
+Resolution is a fixpoint, so the result does not depend on the order
+dependencies happen to be declared in, and a conflict names every requirement
+and who made it:
+
+```
+error: no version of `text` satisfies every requirement
+  `app` requires ^0.3
+  `greet` requires ^0.2
+  available: 0.1.0, 0.2.0, 0.2.3, 0.3.0
+```
+
+A package may only import from packages it declares, so a transitive dependency
+does not silently become part of your API surface.
+
+**Install scripts are prohibited outright**, not merely discouraged: a manifest
+declaring one is rejected rather than having the key quietly ignored.
+`korben audit` and `korben doctor` report weakened settings, including
+`KORBEN_SKIP_CHECKSUMS`.
+
 ## Status
 
 Implemented:
@@ -166,6 +213,8 @@ Implemented:
 - Ownership, move, and borrow analysis with `Drop`-based resource types.
 - C FFI: typed declarations, a binding generator, and dynamic library loading
   shared by both execution modes.
+- Dependency resolution, a pinned lockfile with SHA-256 checksums, and
+  reproducible builds over path and local-registry sources.
 - Canonical formatter, linter, documentation generator, project-aware REPL.
 - `new`, `init`, `run`, `dev`, `check`, `test`, `fmt`, `lint`, `repl`, `expand`,
   `doc`, `inspect`, `doctor`, `build`.
@@ -191,9 +240,11 @@ Not yet implemented, and reported as such rather than stubbed silently:
   ownership-transfer annotations are not implemented. Function pointers and
   structs passed or returned by value are declined by the generator rather than
   guessed at.
-- **Package management** (Milestone D). Manifests parse dependencies and the
-  lockfile format is specified, but `add`, `remove`, `update`, `publish`,
-  `install`, and `audit` report the milestone they land in.
+- **A network registry** (Milestone D). Dependencies resolve from a directory on
+  this machine — a path, or a registry root laid out as
+  `<registry>/<name>/<version>/`. `korben publish` and `korben install` report
+  the milestone they land in. Package signing, git dependencies, workspaces, and
+  sandboxed build scripts are not implemented.
 - **Language server** (Milestone B). `korben lsp` reports the milestone it lands
   in; the JSON diagnostics and `api.json` it will build on already exist.
 - **Restart-case conditions.** Typed conditions and handlers work; named restart
@@ -239,9 +290,9 @@ native builds reproducible and offline.
 ## Development
 
 ```sh
-cargo test              # 148 tests: reader, formatter, evaluator, checker,
-                        # ownership, FFI, CLI, and interpreter-vs-native
-                        # differential tests
+cargo test              # 173 tests: reader, formatter, evaluator, checker,
+                        # ownership, FFI, packaging, CLI, and
+                        # interpreter-vs-native differential tests
 cargo clippy --workspace --all-targets
 cargo fmt
 ```

@@ -46,6 +46,10 @@ pub fn run(args: &[String]) -> ExitCode {
         "inspect" => cmd_inspect(rest),
         "dev" => cmd_dev(rest),
         "ffi" => cmd_ffi(rest),
+        "add" => cmd_add(rest),
+        "remove" => cmd_remove(rest),
+        "update" => cmd_update(rest),
+        "audit" => cmd_audit(rest),
         other => {
             if let Some(milestone) = planned_command(other) {
                 eprintln!(
@@ -65,9 +69,7 @@ pub fn run(args: &[String]) -> ExitCode {
 /// Commands the specification defines but that land in a later milestone.
 fn planned_command(name: &str) -> Option<&'static str> {
     Some(match name {
-        "add" | "remove" | "update" | "publish" | "install" | "audit" => {
-            "Milestone D (registry and package management)"
-        }
+        "publish" | "install" => "Milestone D (a package registry)",
         "bench" => "Milestone D (benchmark harness)",
         "lsp" => "Milestone B (language server)",
         _ => return None,
@@ -83,6 +85,11 @@ fn print_help() {
     println!("  new <name> [--template cli|lib|service]   create a new project");
     println!("  init                                      add a manifest to this directory");
     println!("  doctor                                    report toolchain and project health\n");
+    println!("{}", ui::bold("DEPENDENCIES"));
+    println!("  add <name> [--version <req>] [--path <dir>] [--dev]");
+    println!("  remove <name>                             drop a dependency");
+    println!("  update                                    re-resolve and rewrite the lockfile");
+    println!("  audit                                     verify the lockfile and checksums\n");
     println!("{}", ui::bold("DEVELOP"));
     println!("  run [entry] [-- args...]                  run the project or a single file");
     println!("  dev                                       check, test, then run");
@@ -852,6 +859,296 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
+// -------------------------------------------------------------- dependencies
+
+/// Locate the manifest of the project the command was run in.
+fn manifest_path() -> Result<PathBuf, ExitCode> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    match project::find_manifest(&cwd) {
+        Some(path) => Ok(path),
+        None => {
+            eprintln!(
+                "{} no {} found here or in any parent",
+                ui::red("error:"),
+                project::MANIFEST_NAME
+            );
+            Err(ExitCode::from(2))
+        }
+    }
+}
+
+fn cmd_add(args: &[String]) -> ExitCode {
+    let flags = Flags::parse(args);
+    let Some(name) = flags.positional.first() else {
+        eprintln!("{} `korben add` needs a package name", ui::red("error:"));
+        eprintln!("  korben add <name> [--version <req>] [--path <dir>] [--dev]");
+        return ExitCode::from(2);
+    };
+    let path = match manifest_path() {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        eprintln!("{} cannot read {}", ui::red("error:"), path.display());
+        return ExitCode::FAILURE;
+    };
+    let dev = flags.has("dev");
+    let section = if dev { "dev-dependencies" } else { "dependencies" };
+    let requirement = flags.value("version").unwrap_or("*").to_string();
+    let directory = flags.value("path").map(str::to_string);
+
+    let updated = match add_dependency(&text, section, name, &requirement, directory.as_deref()) {
+        Ok(updated) => updated,
+        Err(error) => {
+            eprintln!("{} {error}", ui::red("error:"));
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(error) = std::fs::write(&path, updated) {
+        eprintln!("{} cannot write {}: {error}", ui::red("error:"), path.display());
+        return ExitCode::FAILURE;
+    }
+    match directory {
+        Some(directory) => println!("{} {name} (path {directory})", ui::green("added")),
+        None => println!("{} {name} {requirement}", ui::green("added")),
+    }
+    relock(&flags)
+}
+
+fn cmd_remove(args: &[String]) -> ExitCode {
+    let flags = Flags::parse(args);
+    let Some(name) = flags.positional.first() else {
+        eprintln!("{} `korben remove` needs a package name", ui::red("error:"));
+        return ExitCode::from(2);
+    };
+    let path = match manifest_path() {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        eprintln!("{} cannot read {}", ui::red("error:"), path.display());
+        return ExitCode::FAILURE;
+    };
+    let (updated, removed) = remove_dependency(&text, name);
+    if !removed {
+        eprintln!("{} `{name}` is not a declared dependency", ui::yellow("note:"));
+        return ExitCode::SUCCESS;
+    }
+    if let Err(error) = std::fs::write(&path, updated) {
+        eprintln!("{} cannot write {}: {error}", ui::red("error:"), path.display());
+        return ExitCode::FAILURE;
+    }
+    println!("{} {name}", ui::green("removed"));
+    relock(&flags)
+}
+
+fn cmd_update(args: &[String]) -> ExitCode {
+    let flags = Flags::parse(args);
+    let path = match manifest_path() {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
+    let root = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    // Removing the lock forces a fresh resolution.
+    let _ = std::fs::remove_file(root.join(korben_core::pkg::LOCK_NAME));
+    relock(&flags)
+}
+
+/// Re-resolve and report what the lockfile now pins.
+fn relock(flags: &Flags) -> ExitCode {
+    let session = match open_session(flags) {
+        Ok(session) => session,
+        Err(code) => return code,
+    };
+    if session.resolution.is_empty() {
+        println!("{} no dependencies to lock", ui::dim("note:"));
+        return ExitCode::SUCCESS;
+    }
+    println!("\n{}", ui::bold("locked"));
+    for package in &session.resolution.packages {
+        println!("  {} {}  {}", package.name, package.version, ui::dim(&package.source.identity()));
+    }
+    ExitCode::SUCCESS
+}
+
+fn cmd_audit(_args: &[String]) -> ExitCode {
+    let path = match manifest_path() {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
+    let root = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let manifest = match korben_core::manifest::Manifest::load(&path) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            eprintln!("{} {error}", ui::red("error:"));
+            return ExitCode::FAILURE;
+        }
+    };
+    let lock_path = root.join(korben_core::pkg::LOCK_NAME);
+    let declared = manifest.dependencies.len() + manifest.dev_dependencies.len();
+
+    println!("{}", ui::bold("package"));
+    println!("  name         {}", manifest.name);
+    println!("  version      {}", manifest.version);
+    let mut findings: Vec<String> = Vec::new();
+    if manifest.license.is_none() {
+        findings.push("no license is declared".to_string());
+    }
+    if manifest.description.is_none() {
+        findings.push("no description is declared".to_string());
+    }
+
+    println!("\n{}", ui::bold("dependencies"));
+    if declared == 0 {
+        println!("  {}", ui::dim("none declared; there is nothing to lock"));
+    } else if !lock_path.is_file() {
+        println!("  {} no lockfile; run `korben update`", ui::red("missing:"));
+        findings.push("the build is not reproducible without a lockfile".to_string());
+    } else {
+        match korben_core::pkg::Lockfile::load(&lock_path) {
+            Ok(lock) => {
+                if !lock.matches(&manifest) {
+                    println!(
+                        "  {} the lockfile does not describe this manifest",
+                        ui::red("stale:")
+                    );
+                    findings.push("run `korben update` to re-resolve".to_string());
+                }
+                for locked in &lock.packages {
+                    let resolved = korben_core::pkg::Lockfile {
+                        root: lock.root.clone(),
+                        manifest_digest: lock.manifest_digest.clone(),
+                        packages: vec![locked.clone()],
+                    }
+                    .materialize(&root, &manifest);
+                    match resolved {
+                        Ok(_) => println!(
+                            "  {} {} {}  {}",
+                            ui::green("ok"),
+                            locked.name,
+                            locked.version,
+                            ui::dim(&locked.checksum)
+                        ),
+                        Err(error) => {
+                            println!("  {} {} {}", ui::red("FAIL"), locked.name, locked.version);
+                            for line in error.lines() {
+                                println!("       {line}");
+                            }
+                            findings.push(format!("`{}` failed verification", locked.name));
+                        }
+                    }
+                    if locked.source.is_local() {
+                        findings.push(format!(
+                            "`{}` comes from a local path, so the lock is not portable",
+                            locked.name
+                        ));
+                    }
+                }
+            }
+            Err(error) => {
+                println!("  {} {error}", ui::red("unreadable:"));
+                findings.push("the lockfile could not be parsed".to_string());
+            }
+        }
+    }
+
+    println!("\n{}", ui::bold("supply chain"));
+    println!("  {} install scripts are prohibited and never executed", ui::green("ok"));
+    if std::env::var_os(korben_core::pkg::SKIP_CHECKSUMS).is_some() {
+        println!(
+            "  {} {} is set, so checksums are not verified",
+            ui::red("weakened:"),
+            korben_core::pkg::SKIP_CHECKSUMS
+        );
+        findings.push("checksum verification is disabled".to_string());
+    } else {
+        println!("  {} checksums are verified on every build", ui::green("ok"));
+    }
+    if !manifest.ffi_c.is_empty() {
+        println!("  {} links native libraries: {}", ui::yellow("note:"), manifest.ffi_c.join(", "));
+    }
+
+    if findings.is_empty() {
+        println!("\n{} nothing to report", ui::green("audit:"));
+        return ExitCode::SUCCESS;
+    }
+    println!("\n{}", ui::bold("findings"));
+    for finding in &findings {
+        println!("  - {finding}");
+    }
+    ExitCode::SUCCESS
+}
+
+/// Insert a dependency line, creating the section if it is missing.
+fn add_dependency(
+    text: &str,
+    section: &str,
+    name: &str,
+    requirement: &str,
+    path: Option<&str>,
+) -> Result<String, String> {
+    let (without, _) = remove_dependency(text, name);
+    let mut out = without.trim_end().to_string();
+    match path {
+        // A path dependency needs the long form.
+        Some(path) => {
+            out.push_str(&format!("\n\n[{section}.{name}]\n"));
+            if requirement != "*" {
+                out.push_str(&format!("version = \"{requirement}\"\n"));
+            }
+            out.push_str(&format!("path = \"{path}\"\n"));
+        }
+        None => {
+            let header = format!("[{section}]");
+            match out.find(&header) {
+                Some(index) => {
+                    let line_end = out[index..]
+                        .find('\n')
+                        .map(|offset| index + offset + 1)
+                        .unwrap_or(out.len());
+                    out.insert_str(line_end, &format!("{name} = \"{requirement}\"\n"));
+                }
+                None => {
+                    out.push_str(&format!("\n\n{header}\n{name} = \"{requirement}\"\n"));
+                }
+            }
+        }
+    }
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+/// Drop every declaration of `name`, in either form.
+fn remove_dependency(text: &str, name: &str) -> (String, bool) {
+    let mut out = String::with_capacity(text.len());
+    let mut removed = false;
+    let mut skipping_section = false;
+    let short = format!("{name} =");
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            skipping_section = trimmed == format!("[dependencies.{name}]")
+                || trimmed == format!("[dev-dependencies.{name}]");
+            if skipping_section {
+                removed = true;
+                continue;
+            }
+        }
+        if skipping_section {
+            continue;
+        }
+        if trimmed.starts_with(&short) || trimmed.starts_with(&format!("\"{name}\" =")) {
+            removed = true;
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    (out, removed)
+}
+
 // ---------------------------------------------------------------------- ffi
 
 fn cmd_ffi(args: &[String]) -> ExitCode {
@@ -1004,15 +1301,29 @@ fn cmd_doctor(args: &[String]) -> ExitCode {
                             manifest.edition
                         );
                     }
+                    let lock =
+                        manifest_path.parent().map(|root| root.join(korben_core::pkg::LOCK_NAME));
+                    let declared = manifest.dependencies.len() + manifest.dev_dependencies.len();
+                    println!("  dependencies {declared}");
+                    match lock {
+                        Some(lock) if lock.is_file() => {
+                            println!("  lockfile     {}", lock.display())
+                        }
+                        _ if declared > 0 => println!(
+                            "  {} no lockfile; run `korben update`",
+                            ui::yellow("lockfile:")
+                        ),
+                        _ => {}
+                    }
+                    if std::env::var_os(korben_core::pkg::SKIP_CHECKSUMS).is_some() {
+                        println!(
+                            "  {} {} is set; dependency checksums are not verified",
+                            ui::red("warning:"),
+                            korben_core::pkg::SKIP_CHECKSUMS
+                        );
+                    }
                     if !manifest.ffi_c.is_empty() {
                         println!("  links        {}", manifest.ffi_c.join(", "));
-                    }
-                    if !manifest.dependencies.is_empty() {
-                        println!(
-                            "  {} {} dependencies declared; the registry lands in Milestone D",
-                            ui::yellow("note:"),
-                            manifest.dependencies.len()
-                        );
                     }
                 }
                 Err(error) => println!("  {} {error}", ui::red("error:")),
@@ -1105,7 +1416,11 @@ pub fn open_session(flags: &Flags) -> Result<Session, ExitCode> {
                 return Ok(session);
             }
             eprintln!("{} {error}", ui::red("error:"));
-            eprintln!("  Run `korben new <name>` to create a project, or pass a `.kb` file.");
+            // Only suggest creating a project when there genuinely is none;
+            // a failure inside an existing project needs a different fix.
+            if project::find_manifest(&cwd).is_none() {
+                eprintln!("  Run `korben new <name>` to create a project, or pass a `.kb` file.");
+            }
             Err(ExitCode::from(2))
         }
     }
@@ -1202,5 +1517,16 @@ impl Flags {
 }
 
 fn takes_value(name: &str) -> bool {
-    matches!(name, "template" | "out" | "target" | "emit" | "filter" | "library" | "module")
+    matches!(
+        name,
+        "template"
+            | "out"
+            | "target"
+            | "emit"
+            | "filter"
+            | "library"
+            | "module"
+            | "path"
+            | "version"
+    )
 }

