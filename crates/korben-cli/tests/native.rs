@@ -354,3 +354,55 @@ fn foreign_calls_agree_between_execution_modes() {
 "#,
     );
 }
+
+#[test]
+fn structured_concurrency_agrees_between_execution_modes() {
+    assert_same(
+        "async",
+        "concurrency",
+        r#"(module concurrency
+  (use std.async :as task))
+
+(async fn work [n: Int] -> Result Int String !async !io
+  (println (format "running {n}"))
+  (if (= n 9) (Err "nine is bad") (Ok (* n 2))))
+
+(async fn produce [sender: Sender] -> Unit !async
+  (each [1 2 3] (fn [n] (sender.send n)))
+  (sender.close))
+
+(pub fn drain [receiver: Receiver total: Int] -> Int !async
+  (match (receiver.recv)
+    (Some value) (recur receiver (+ total value))
+    (None) total))
+
+(pub fn main [] -> Unit !io !async
+  (task-scope scope
+    (let tasks (map [1 2 3] (fn [n] (spawn scope (work n)))))
+    (println "spawned")
+    (println (task.join-all tasks)))
+
+  (task-scope scope
+    (let tasks (map [1 9 3] (fn [n] (spawn scope (work n)))))
+    (println (task.join-all tasks)))
+
+  (task-scope scope
+    (spawn scope (work 5))
+    (println "the scope joins this one"))
+
+  (task-scope scope
+    (let pending (spawn scope (work 8)))
+    (scope.cancel)
+    (println (pending.state)))
+
+  (async (println (await (work 4))))
+
+  (task-scope scope
+    (let ends (task.channel))
+    (let sender (get ends 0))
+    (let receiver (get ends 1))
+    (spawn scope (produce sender))
+    (println "channel total:" (drain receiver 0))))
+"#,
+    );
+}

@@ -12,7 +12,21 @@ use crate::value::{Arg, Body, Caller, Flow, Function, Outcome, Param, Value};
 use std::rc::Rc;
 
 /// Invoke a value.
+///
+/// Calling an `async fn` does not run it: it yields a task, which `await`,
+/// `join-all`, or the end of the enclosing scope will run.
 pub fn apply(caller: &mut dyn Caller, function: &Value, args: Vec<Arg>, loc: Loc) -> Outcome {
+    if let Value::Fn(callable) = function {
+        if callable.is_async {
+            return Ok(crate::task::defer(function.clone(), args, loc));
+        }
+    }
+    apply_now(caller, function, args, loc)
+}
+
+/// Invoke a value, running an async function's body rather than deferring it.
+/// The scheduler uses this to start a task.
+pub fn apply_now(caller: &mut dyn Caller, function: &Value, args: Vec<Arg>, loc: Loc) -> Outcome {
     let Value::Fn(callable) = function else {
         // Applying a non-function to no arguments yields the value itself,
         // which is what makes `(None)` and `(user.name)` read naturally.

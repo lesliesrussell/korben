@@ -126,6 +126,8 @@ pub struct Function {
     pub name: String,
     pub params: Vec<Param>,
     pub body: Body,
+    /// Calling an async function yields a task rather than running it.
+    pub is_async: bool,
 }
 
 /// Native functions receive a caller so higher-order builtins such as `map`
@@ -149,6 +151,7 @@ pub enum Body {
 }
 
 /// One argument at a call site.
+#[derive(Clone)]
 pub struct Arg {
     pub keyword: Option<String>,
     pub value: Value,
@@ -272,13 +275,19 @@ impl Value {
     }
 
     pub fn native(name: &str, params: Vec<Param>, func: NativeFn) -> Value {
-        Value::Fn(Rc::new(Function { name: name.to_string(), params, body: Body::Native(func) }))
+        Value::Fn(Rc::new(Function {
+            name: name.to_string(),
+            params,
+            body: Body::Native(func),
+            is_async: false,
+        }))
     }
 
     pub fn ctor(type_name: &str, variant: Option<&str>, fields: &[&str]) -> Value {
         Value::Fn(Rc::new(Function {
             name: variant.unwrap_or(type_name).to_string(),
             params: Vec::new(),
+            is_async: false,
             body: Body::Ctor {
                 type_name: Rc::from(type_name),
                 variant: variant.map(Rc::from),
@@ -292,6 +301,7 @@ impl Value {
             name: name.to_string(),
             params: Vec::new(),
             body: Body::Method { protocol: Rc::from(protocol), name: Rc::from(name) },
+            is_async: false,
         }))
     }
 

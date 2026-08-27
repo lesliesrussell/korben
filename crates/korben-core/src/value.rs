@@ -59,10 +59,12 @@ pub fn closure_value(closure: Rc<Closure>) -> Value {
             has_default: param.default.is_some(),
         })
         .collect();
+    let is_async = closure.decl.is_async;
     Value::Fn(Rc::new(Function {
         name: closure.decl.name.clone(),
         params,
         body: Body::Host(Box::new(closure)),
+        is_async,
     }))
 }
 

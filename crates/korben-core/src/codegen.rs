@@ -22,6 +22,9 @@ use std::fmt::Write as _;
 #[derive(Clone, Copy, PartialEq)]
 enum Symbol {
     Function,
+    /// An async function: calling it yields a task, so it must go through
+    /// `apply` rather than being called directly.
+    AsyncFunction,
     Const,
 }
 
@@ -55,7 +58,8 @@ pub fn generate(program: &Program, sources: &SourceMap) -> Result<Generated, Vec
     let mut symbols = HashMap::new();
     for module in &program.modules {
         for function in &module.functions {
-            symbols.insert(function.symbol.clone(), Symbol::Function);
+            let kind = if function.is_async { Symbol::AsyncFunction } else { Symbol::Function };
+            symbols.insert(function.symbol.clone(), kind);
         }
         for foreign in &module.foreign {
             symbols.insert(foreign.symbol.clone(), Symbol::Function);
@@ -110,6 +114,7 @@ use korben_runtime::apply::{
 };
 use korben_runtime::ffi::{CSignature, CType};
 use korben_runtime::loc::Loc;
+use korben_runtime::task::{await_value, enter_scope, exit_scope, spawn};
 use korben_runtime::value::{
     display, member, Arg, Body, Caller, Flow, Function, Outcome, Param, Value,
 };
@@ -361,7 +366,7 @@ impl Generator {
         let _ = writeln!(self.out, "    thread_local! {{");
         let _ = writeln!(
             self.out,
-            "        static V: Value = Value::Fn(Rc::new(Function {{ name: {}.to_string(), params: p_{symbol}(), body: Body::Rust(Box::new(f_{symbol})) }}));",
+            "        static V: Value = Value::Fn(Rc::new(Function {{ name: {}.to_string(), params: p_{symbol}(), body: Body::Rust(Box::new(f_{symbol})), is_async: false }}));",
             quote(&foreign.name)
         );
         let _ = writeln!(self.out, "    }}");
@@ -396,8 +401,9 @@ impl Generator {
         let _ = writeln!(self.out, "    thread_local! {{");
         let _ = writeln!(
             self.out,
-            "        static V: Value = Value::Fn(Rc::new(Function {{ name: {}.to_string(), params: p_{symbol}(), body: Body::Rust(Box::new(f_{symbol})) }}));",
-            quote(&function.name)
+            "        static V: Value = Value::Fn(Rc::new(Function {{ name: {}.to_string(), params: p_{symbol}(), body: Body::Rust(Box::new(f_{symbol})), is_async: {} }}));",
+            quote(&function.name),
+            function.is_async
         );
         let _ = writeln!(self.out, "    }}");
         let _ = writeln!(self.out, "    V.with(|value| value.clone())");
@@ -818,6 +824,45 @@ impl Generator {
                 let outer = self.error_label();
                 format!("kb_try!({outer}, {body})")
             }
+            // A scope joins its children on the way out, or cancels them when
+            // the body is already failing.
+            Expr::TaskScope { slot, body, span } => {
+                let label = self.label();
+                self.error_labels.push(label.clone());
+                let compiled = self.block(body, &label);
+                self.error_labels.pop();
+                let outer = self.error_label();
+                let _ = span;
+                format!(
+                    "{{ let __scope = enter_scope({}); let {slot} = __scope.clone(); \
+                     let __out: Outcome = {compiled}; \
+                     let __closed = exit_scope(__c, &__scope, __out.is_err()); \
+                     let __value = kb_try!({outer}, __out); \
+                     kb_try!({outer}, __closed.map(|_| Value::Nil)); __value }}",
+                    quote(slot)
+                )
+            }
+            Expr::Spawn { scope, thunk, span } => {
+                let scope = self.expr(scope);
+                let scope_slot = self.temp();
+                let thunk = self.expr(thunk);
+                let thunk_slot = self.temp();
+                let outer = self.error_label();
+                format!(
+                    "{{ let {scope_slot} = {scope}; let {thunk_slot} = {thunk}; \
+                     kb_try!({outer}, spawn(&{scope_slot}, {thunk_slot}, {})) }}",
+                    loc_expr(loc_of(*span))
+                )
+            }
+            Expr::Await(inner, span) => {
+                let inner = self.expr(inner);
+                let slot = self.temp();
+                let outer = self.error_label();
+                format!(
+                    "{{ let {slot} = {inner}; kb_try!({outer}, await_value(__c, &{slot}, {})) }}",
+                    loc_expr(loc_of(*span))
+                )
+            }
             Expr::Quote(value, _) => quote_value(value),
         }
     }
@@ -884,12 +929,21 @@ impl Generator {
         self.recur_labels.pop();
         self.error_labels.pop();
 
-        let mut out = String::new();
+        // A closure is a value that outlives the block it was written in, so it
+        // copies what it reads rather than borrowing or moving it. Values are
+        // reference counted, so copying is cheap.
+        let mut out = String::from("{\n");
+        for (index, slot) in lambda.captures.iter().enumerate() {
+            let _ = writeln!(out, "let __cap{index}_{slot} = {slot}.clone();");
+        }
         let _ = writeln!(
             out,
-            "Value::Fn(Rc::new(Function {{ name: {}.to_string(), params: {params_fn}(), body: Body::Rust(Box::new(move |__c: &mut dyn Caller, __args: Vec<Arg>, __loc: Loc| -> Outcome {{",
+            "Value::Fn(Rc::new(Function {{ name: {}.to_string(), is_async: false, params: {params_fn}(), body: Body::Rust(Box::new(move |__c: &mut dyn Caller, __args: Vec<Arg>, __loc: Loc| -> Outcome {{",
             quote(&lambda.name)
         );
+        for (index, slot) in lambda.captures.iter().enumerate() {
+            let _ = writeln!(out, "    let {slot} = __cap{index}_{slot}.clone();");
+        }
         let _ = writeln!(out, "    let mut __args = __args;");
         let _ = writeln!(out, "    loop {{");
         let _ = writeln!(
@@ -918,6 +972,7 @@ impl Generator {
         let _ = writeln!(out, "    }}");
         // Close: closure body, Box::new, Body::Rust, Function, Rc::new, Value::Fn.
         let _ = writeln!(out, "}})) }}))");
+        out.push('}');
         out
     }
 
@@ -1218,6 +1273,7 @@ pub const RUNTIME_FILES: &[(&str, &str)] = &[
     ("src/apply.rs", include_str!("../../korben-runtime/src/apply.rs")),
     ("src/ffi.rs", include_str!("../../korben-runtime/src/ffi.rs")),
     ("src/net.rs", include_str!("../../korben-runtime/src/net.rs")),
+    ("src/task.rs", include_str!("../../korben-runtime/src/task.rs")),
     ("src/std.rs", include_str!("../../korben-runtime/src/std.rs")),
     ("src/json.rs", include_str!("../../korben-runtime/src/json.rs")),
 ];

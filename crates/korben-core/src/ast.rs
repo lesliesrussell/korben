@@ -451,6 +451,12 @@ pub enum Expr {
         body: Box<Body>,
         span: Span,
     },
+    /// `(spawn scope expr)` — defer `expr` as a task in `scope`.
+    Spawn {
+        scope: Box<Expr>,
+        thunk: Box<Expr>,
+        span: Span,
+    },
     Quote(Rc<Syntax>, Span),
     /// Compile-time constructed syntax with `~` / `~@` holes filled in.
     SyntaxQuote(Rc<Template>, Span),
@@ -511,6 +517,7 @@ impl Expr {
             | Expr::Unsafe(_, span)
             | Expr::Await(_, span)
             | Expr::TaskScope { span, .. }
+            | Expr::Spawn { span, .. }
             | Expr::Quote(_, span)
             | Expr::SyntaxQuote(_, span) => *span,
         }

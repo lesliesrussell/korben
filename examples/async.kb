@@ -1,0 +1,87 @@
+;;; Structured concurrency.
+;;;
+;;; The scheduler is cooperative and single-threaded: tasks are concurrent, not
+;;; simultaneous. Calling an `async fn` yields a task rather than running it, and
+;;; a scope owns every task started under it.
+;;;
+;;; Run it with `korben run examples/async.kb`.
+(module async-tour
+  (use std.async :as task)
+  (use std.string :as string))
+
+(pub type Profile
+  {id: Int name: String})
+
+(pub enum DashboardError
+  (Missing id: Int)
+  (Cancelled reason: String))
+
+;;; Fetch one profile. Calling this returns a task; nothing runs until the task
+;;; is awaited, joined, or its scope closes.
+(pub async fn fetch-profile [id: Int] -> Result Profile DashboardError !async !io
+  (println (format "  fetching {id}"))
+  (if (> id 100) (Err (Missing id)) (Ok (Profile {id id name (format "profile-{id}")}))))
+
+;;; Load several profiles at once. This is the shape specification 15.2 uses.
+(pub async fn load-dashboard [ids: Vec Int] -> Result
+  (Vec Profile)
+  DashboardError
+  !async
+  !io
+  (task-scope scope
+    (let tasks (map ids (fn [id] (spawn scope (fetch-profile id)))))
+    (println "  all spawned; none has run yet")
+    (task.join-all tasks)))
+
+;;; Produce values into a channel, then close it so the consumer stops.
+(pub async fn produce [sender: Sender count: Int] -> Unit !async !io
+  (each (range 1 (inc count)) (fn [n] (sender.send (* n n))))
+  (sender.close))
+
+;;; Drain a channel until it closes.
+(pub fn drain [receiver: Receiver total: Int] -> Int !async
+  (match (receiver.recv)
+    (Some value) (recur receiver (+ total value))
+    (None) total))
+
+(pub fn main [] -> Unit !io !async
+  (println "concurrent fetches:")
+  (async
+    (match (await (load-dashboard [1 2 3]))
+      (Ok profiles) (println "  names:" (map profiles (fn [p] p.name)))
+      (Err error) (println "  failed:" error)))
+
+  (println "a failing child short-circuits join-all:")
+  (async
+    (match (await (load-dashboard [1 900 3]))
+      (Ok profiles) (println "  unexpected:" profiles)
+      (Err error) (println "  reported:" error)))
+
+  (println "a scope joins children nobody awaited:")
+  (task-scope scope (spawn scope (fetch-profile 7)) (println "  body finished first"))
+
+  (println "cancellation stops work that has not started:")
+  (task-scope scope
+    (spawn scope (fetch-profile 8))
+    (scope.cancel)
+    (println "  cancelled:" (scope.cancelled?)))
+
+  (println "channels connect a producer and a consumer:")
+  (task-scope scope
+    (let ends (task.channel))
+    (let sender (get ends 0))
+    (let receiver (get ends 1))
+    (spawn scope (produce sender 4))
+    ; Receiving drives the producer, which has not started yet.
+    (println "  sum of squares:" (drain receiver 0)))
+
+  ; A bounded channel is fine while the producer never has to wait on a consumer
+  ; that is already running. A started task cannot suspend, so the scheduler
+  ; reports that situation as a deadlock rather than hanging.
+  (println "a bounded channel with room for the whole batch:")
+  (task-scope scope
+    (let ends (task.bounded 8))
+    (let sender (get ends 0))
+    (let receiver (get ends 1))
+    (spawn scope (produce sender 4))
+    (println "  sum of squares:" (drain receiver 0))))

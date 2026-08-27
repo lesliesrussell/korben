@@ -441,6 +441,7 @@ impl Session {
                     let value = Value::Fn(Rc::new(crate::value::Function {
                         name: name.clone(),
                         params,
+                        is_async: false,
                         body: crate::value::Body::Rust(Box::new(move |_, args, loc| {
                             let values = args.into_iter().map(|arg| arg.value).collect();
                             korben_runtime::ffi::call(&signature, values, &name, loc)

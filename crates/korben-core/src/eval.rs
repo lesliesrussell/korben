@@ -491,10 +491,27 @@ impl Interp {
                 self.in_unsafe = previous;
                 result
             }
-            // The v0.1 runtime executes async work eagerly on the calling task.
-            // Structured concurrency lands with the async runtime in Milestone D.
-            Expr::Await(inner, _) => self.eval(inner, env),
-            Expr::TaskScope { body, .. } => self.eval_body(body, env),
+            Expr::Await(inner, span) => {
+                let value = self.eval(inner, env)?;
+                korben_runtime::task::await_value(self, &value, loc_of(*span))
+            }
+            Expr::Spawn { scope, thunk, span } => {
+                let scope = self.eval(scope, env)?;
+                let thunk = self.eval(thunk, env)?;
+                korben_runtime::task::spawn(&scope, thunk, loc_of(*span))
+            }
+            Expr::TaskScope { name, body, .. } => {
+                // A scope owns the tasks started under it: on the way out they
+                // are joined, or cancelled if the body is already failing.
+                let scope = korben_runtime::task::enter_scope(name);
+                let inner = env.child();
+                inner.define(Rc::from(name.as_str()), scope.clone());
+                let result = self.eval_body(body, &inner);
+                let closed = korben_runtime::task::exit_scope(self, &scope, result.is_err());
+                let value = result?;
+                closed?;
+                Ok(value)
+            }
             Expr::Quote(syntax, _) => Ok(quote_value(syntax)),
             Expr::SyntaxQuote(template, _) => {
                 let built = self.build_template(template, env)?;

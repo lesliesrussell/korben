@@ -57,6 +57,43 @@ error[type-mismatch]: type mismatch in an argument
   note:    found: String
 ```
 
+## Structured concurrency
+
+Korben values are reference counted, so they belong to one thread. The scheduler
+is therefore **cooperative and single-threaded: tasks are concurrent, not
+simultaneous.**
+
+Calling an `async fn` yields a task rather than running it. A scope owns every
+task started under it, and on the way out joins them — or cancels them if the
+body is already failing — so nothing silently outlives the operation that
+created it, as specification 15.2 requires.
+
+```lisp
+(pub async fn load-dashboard [ids: Vec Int] -> Result (Vec Profile) DashboardError !async !io
+  (task-scope scope
+    (let tasks (map ids (fn [id] (spawn scope (fetch-profile id)))))
+    (task.join-all tasks)))
+```
+
+An operation that would block — awaiting, receiving from an empty channel,
+sending to a full one — *drives* other ready tasks and then tries again. That
+makes producer and consumer patterns work without threads.
+
+The cost of not having real suspension: a task that has already started cannot
+be paused. If a task blocks on work that only a running task could produce,
+that is a genuine cycle, and the scheduler says so instead of hanging:
+
+```
+error[channel-deadlock]: the channel is full and nothing can drain it
+   |   (each [1 2 3] (fn [n] (sender.send n)))
+   |                         ^^^^^^^^^^^^^^^^
+  note: no other task is ready to receive
+  help: give the channel more capacity, or receive before sending
+```
+
+`examples/async.kb` walks through spawning, joining, failure propagation,
+cancellation, and channels.
+
 ## Two execution modes
 
 Korben runs the same program two ways, and the specification requires them to
@@ -137,8 +174,12 @@ specification's reference example adapted to what exists.
   `unsafe fn` carrying `!ffi` and `!unsafe` — safe Korben wrappers are the
   ordinary user-facing form. A null `CStr` or pointer marshals to `None`, so
   foreign null never becomes a Korben value. `examples/ffi.kb` calls libc.
+- **Structured concurrency.** `async fn`, `await`, `task-scope`, `spawn`,
+  `join-all`, cooperative cancellation, and typed bounded or unbounded
+  channels. `await` outside asynchronous code is a compile error.
 - Standard library: `std.core`, `std.string`, `std.math`, `std.io`, `std.fs`,
-  `std.json`, `std.log`, `std.time`, `std.process`, `std.test`, `std.syntax`.
+  `std.json`, `std.log`, `std.time`, `std.process`, `std.test`, `std.syntax`,
+  `std.net`, `std.http`, `std.async`.
   `fs.open` and `fs.create` return a `File`, and `std.net` returns `Listener`
   and `Connection` — real resources that `with` closes on every exit path.
 
@@ -216,6 +257,7 @@ Implemented:
 - Core IR, and a native backend that produces standalone executables.
 - Ownership, move, and borrow analysis with `Drop`-based resource types.
 - `std.net` and `std.http`: a working HTTP/1.1 server and client.
+- A cooperative async runtime: tasks, scopes, cancellation, and channels.
 - Per-module namespaces, so two modules may declare the same name.
 - C FFI: typed declarations, a binding generator, and dynamic library loading
   shared by both execution modes.
@@ -227,10 +269,13 @@ Implemented:
 
 Not yet implemented, and reported as such rather than stubbed silently:
 
-- **Async runtime and structured concurrency** (Milestone D). `async`, `await`,
-  and `task-scope` parse and type-check, and run eagerly on the calling task.
-  Channels, task scopes, and cancellation are not implemented, so an HTTP server
-  handles one request at a time. This is the largest remaining gap.
+- **Parallelism.** The scheduler is cooperative and single-threaded, and a
+  started task cannot suspend. Making tasks run simultaneously means moving the
+  value representation from reference counting to atomic sharing, which is a
+  deliberate future change rather than an oversight.
+- **A preemptible I/O reactor.** Because a task cannot suspend on a blocking
+  read, the HTTP server handles one request at a time. Concurrency across
+  connections needs non-blocking sockets driven by the scheduler.
 - **TLS.** `std.http` speaks `http://` only; `https://` needs `std.crypto`.
 - **Lifetime inference.** Ownership tracks moves flow-sensitively and reports
   use-after-move, possible moves across branches, moves inside a loop, cloning a
@@ -319,9 +364,9 @@ native builds reproducible and offline.
 ## Development
 
 ```sh
-cargo test              # 185 tests: reader, formatter, evaluator, checker,
-                        # ownership, FFI, HTTP, packaging, CLI, and
-                        # interpreter-vs-native differential tests
+cargo test              # 200 tests: reader, formatter, evaluator, checker,
+                        # ownership, concurrency, FFI, HTTP, packaging, CLI,
+                        # and interpreter-vs-native differential tests
 cargo clippy --workspace --all-targets
 cargo fmt
 ```

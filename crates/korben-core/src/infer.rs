@@ -169,6 +169,8 @@ struct Checker {
     globals: HashMap<String, Scheme>,
     /// Effects accumulated while checking the current function body.
     effects: Effects,
+    /// True while checking asynchronous code, where `await` is allowed.
+    in_async: bool,
     /// Known type names, for `unknown type` diagnostics.
     known_types: HashSet<String>,
     /// Which local name refers to which declaration, per module.
@@ -190,6 +192,7 @@ impl Checker {
             type_params: HashMap::new(),
             globals: HashMap::new(),
             effects: Effects::NONE,
+            in_async: false,
             known_types: builtin_type_names(),
             namespace: crate::scope::Namespace::default(),
             module: String::new(),
@@ -770,6 +773,8 @@ impl Checker {
             Some(ty) => self.lower_type(ty, &[]),
             None => Type::Unknown,
         };
+        // Calling an async function yields a task, not its result.
+        let ret = if decl.is_async { Type::app("Task", vec![task_payload(&ret)]) } else { ret };
         let keywords = decl.params.iter().filter_map(|param| param.keyword.clone()).collect();
         Scheme::mono(Type::with_keywords(params, ret, decl.declared_effects, keywords))
     }
@@ -868,6 +873,7 @@ impl Checker {
     }
 
     fn check_fn(&mut self, decl: &FnDecl) {
+        let outer_async = std::mem::replace(&mut self.in_async, decl.is_async);
         let mut scope = Scope::new();
         for param in &decl.params {
             let ty = match &param.ty {
@@ -938,6 +944,7 @@ impl Checker {
             }
         }
         self.effects = outer_effects;
+        self.in_async = outer_async;
     }
 
     fn infer_body(&mut self, body: &Body, scope: &mut Scope) -> Type {
@@ -1195,8 +1202,17 @@ impl Checker {
                 self.effects = self.effects.union(Effects(EFFECT_UNSAFE));
                 self.infer_body(body, scope)
             }
-            Expr::Await(inner, _) => {
+            Expr::Await(inner, span) => {
                 self.effects = self.effects.union(Effects(EFFECT_ASYNC));
+                if !self.in_async {
+                    self.diagnostics.push(
+                        Diagnostic::error("`await` is only valid in asynchronous code")
+                            .with_code("await-context")
+                            .at(*span, "there is no asynchronous context here")
+                            .note(ASYNC_CONTEXT_NOTE)
+                            .help(ASYNC_CONTEXT_HELP),
+                    );
+                }
                 let ty = self.infer(inner, scope);
                 match self.prune(&ty) {
                     Type::Con(name, args) if &*name == "Task" && !args.is_empty() => {
@@ -1205,9 +1221,27 @@ impl Checker {
                     other => other,
                 }
             }
-            Expr::TaskScope { body, .. } => {
+            Expr::TaskScope { name, body, .. } => {
                 self.effects = self.effects.union(Effects(EFFECT_ASYNC));
-                self.infer_body(body, scope)
+                scope.push();
+                scope.define(name.clone(), Scheme::mono(Type::con("Scope")));
+                let outer = std::mem::replace(&mut self.in_async, true);
+                let result = self.infer_body(body, scope);
+                self.in_async = outer;
+                scope.pop();
+                result
+            }
+            Expr::Spawn { scope: target, thunk, .. } => {
+                self.effects = self.effects.union(Effects(EFFECT_ASYNC));
+                let target_type = self.infer(target, scope);
+                self.expect(&Type::con("Scope"), &target_type, target.span(), "in `spawn`");
+                let thunk_type = self.infer(thunk, scope);
+                // The thunk is a nullary function; a task carries what it returns.
+                let produced = match self.prune(&thunk_type) {
+                    Type::Fn(function) => function.ret.clone(),
+                    other => other,
+                };
+                Type::app("Task", vec![task_payload(&produced)])
             }
             Expr::Quote(_, _) => Type::Unknown,
             Expr::SyntaxQuote(_, _) => Type::con("Syntax"),
@@ -1632,6 +1666,19 @@ fn borrowed_type(ty: &Type) -> Option<Type> {
     }
 }
 
+const ASYNC_CONTEXT_NOTE: &str =
+    "specification 15.1: `await` belongs to an `async fn`, an `async` block, or a task scope";
+const ASYNC_CONTEXT_HELP: &str =
+    "declare the enclosing function `(async fn ...)`, or wrap this in `(async ...)`";
+
+/// A task never carries another task: awaiting runs through to a value.
+fn task_payload(ty: &Type) -> Type {
+    match ty {
+        Type::Con(name, args) if &**name == "Task" && !args.is_empty() => args[0].clone(),
+        other => other.clone(),
+    }
+}
+
 fn is_numeric(name: &str) -> bool {
     matches!(
         name,
@@ -1659,6 +1706,13 @@ fn builtin_type_names() -> HashSet<String> {
         "String",
         "Listener",
         "Connection",
+        // The async runtime.
+        "Task",
+        "Scope",
+        "Sender",
+        "Receiver",
+        "ChannelError",
+        "Cancelled",
         "Bytes",
         "Unit",
         "Never",

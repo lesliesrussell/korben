@@ -276,6 +276,22 @@ pub const NAMES: &[&str] = &[
     "std.test/assert",
     "std.test/assert-eq",
     "std.test/assert-ne",
+    // std.async: tasks, scopes, and channels
+    "std.async/join-all",
+    "std.async/join",
+    "std.async/channel",
+    "std.async/bounded",
+    "Scope/cancel",
+    "Scope/cancelled?",
+    "Task/cancel",
+    "Task/state",
+    "Sender/send",
+    "Sender/close",
+    "Sender/len",
+    "Receiver/recv",
+    "Receiver/try-recv",
+    "Receiver/close",
+    "Receiver/len",
     // Cell
     "Cell/new",
     "Cell/get",
@@ -1003,6 +1019,40 @@ pub fn builtin(name: &str) -> Option<Value> {
             std::process::exit(code as i32)
         }),
 
+        "std.async/join-all" => {
+            native("join-all", 1, |caller, args, loc| crate::task::join_all(caller, &args[0], loc))
+        }
+        "std.async/join" => {
+            native("join", 1, |caller, args, loc| crate::task::await_value(caller, &args[0], loc))
+        }
+        // An unbounded channel never makes a sender wait.
+        "std.async/channel" => native("channel", 0, |_, _args, _| Ok(crate::task::channel(None))),
+        "std.async/bounded" => native("bounded", 1, |_, args, loc| {
+            let capacity = as_int("channel.bounded", &args[0], loc)?.max(0) as usize;
+            Ok(crate::task::channel(Some(capacity)))
+        }),
+        "Scope/cancel" => native("cancel", 1, |_, args, _| crate::task::cancel_scope(&args[0])),
+        "Scope/cancelled?" => {
+            native("cancelled?", 1, |_, args, _| crate::task::scope_cancelled(&args[0]))
+        }
+        "Task/cancel" => native("cancel", 1, |_, args, _| crate::task::cancel_task(&args[0])),
+        "Task/state" => native("state", 1, |_, args, _| crate::task::task_state_name(&args[0])),
+        "Sender/send" => native("send", 2, |caller, args, loc| {
+            crate::task::send(caller, &args[0], args[1].clone(), loc)
+        }),
+        "Receiver/recv" => {
+            native("recv", 1, |caller, args, loc| crate::task::recv(caller, &args[0], loc))
+        }
+        "Receiver/try-recv" => {
+            native("try-recv", 1, |_, args, loc| crate::task::try_recv(&args[0], loc))
+        }
+        "Sender/close" | "Receiver/close" => {
+            native("close", 1, |_, args, _| crate::task::close_channel(&args[0]))
+        }
+        "Sender/len" | "Receiver/len" => {
+            native("len", 1, |_, args, _| crate::task::channel_len(&args[0]))
+        }
+
         "Cell/new" => {
             native("new", 1, |_, args, _| Ok(Value::Cell(Rc::new(RefCell::new(args[0].clone())))))
         }
@@ -1040,6 +1090,10 @@ pub fn method_of(type_name: &str, method: &str) -> Option<Value> {
         "File" => "File",
         "Listener" => "Listener",
         "Connection" => "Connection",
+        "Scope" => "Scope",
+        "Task" => "Task",
+        "Sender" => "Sender",
+        "Receiver" => "Receiver",
         _ => return None,
     };
     builtin(&format!("{module}/{method}"))

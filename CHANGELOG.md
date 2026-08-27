@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.7.0 — Structured concurrency
+
+An async runtime, within the constraint that Korben values are reference
+counted and therefore belong to one thread: the scheduler is cooperative and
+single-threaded, so tasks are concurrent rather than simultaneous.
+
+### Added
+
+- **Tasks.** Calling an `async fn` yields a task instead of running it.
+  `await` runs one, `join-all` runs many and short-circuits on the first `Err`,
+  and a task carries its result, its failure, or its cancellation.
+- **Task scopes.** `(task-scope name ...)` binds a scope; on the way out it
+  joins the tasks started under it, or cancels them when the body is already
+  failing. A child's failure reaches the code that started it, so nothing is
+  silently dropped — specification 15.2's guarantee that a task never outlives
+  the operation that created it.
+- **`spawn`**, written `(spawn scope expr)` or `(scope.spawn expr)`. The
+  expression is deferred rather than evaluated at the call.
+- **Channels**, bounded and unbounded, over `std.async`. Sending to a full
+  channel or receiving from an empty one drives other ready tasks and retries,
+  so producer and consumer patterns work without threads. A genuine cycle is
+  reported as a deadlock, naming what could not make progress, rather than
+  hanging.
+- **Cooperative cancellation**: `scope.cancel` stops work that has not started,
+  and a running task can check `scope.cancelled?`.
+- The checker types an `async fn` as returning `Task T`, unwraps it at `await`,
+  and rejects `await` outside asynchronous code per specification 15.1.
+- `examples/async.kb`.
+
+### Fixed
+
+- Generated closures captured their environment by move, so a value used after
+  a closure was created failed to compile. The core IR now records which
+  enclosing locals a closure reads, and generated code copies them — which is
+  cheap, because values are reference counted.
+
+### Not in this release
+
+Parallelism, and a preemptible I/O reactor. A started task cannot suspend, so
+the HTTP server still handles one request at a time.
+
 ## 0.6.0 — HTTP
 
 A typed HTTP program can now be written, which closes the last open half of

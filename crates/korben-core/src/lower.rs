@@ -1240,6 +1240,18 @@ impl<'a> Lowerer<'a> {
             if let Some(expr) = self.special_form(head, &items, span) {
                 return expr;
             }
+            // `(scope.spawn expr)` is the same as `(spawn scope expr)`: the
+            // expression is deferred, so it must not be evaluated here.
+            if let Some(prefix) = head.strip_suffix(".spawn") {
+                if items.len() == 2 && !prefix.is_empty() {
+                    let scope = self.symbol_expr(prefix, items[0].span);
+                    return Expr::Spawn {
+                        scope: Box::new(scope),
+                        thunk: Box::new(self.thunk(&items[1], span)),
+                        span,
+                    };
+                }
+            }
             // `(.field target args...)` is field access or a method call.
             // A dotted name such as `.a.b` chains field accesses.
             if let Some(path) = head.strip_prefix('.') {
@@ -1463,6 +1475,30 @@ impl<'a> Lowerer<'a> {
             "propagate" => Some(Expr::Propagate(Box::new(self.expr(items.get(1)?)), span)),
             "throw" => Some(Expr::Throw(Box::new(self.expr(items.get(1)?)), span)),
             "await" => Some(Expr::Await(Box::new(self.expr(items.get(1)?)), span)),
+            "spawn" => {
+                let Some(scope) = items.get(1) else {
+                    self.error(
+                        Diagnostic::error("`spawn` needs a task scope")
+                            .with_code("spawn-form")
+                            .at(span, "expected `(spawn scope expression)`"),
+                    );
+                    return Some(Expr::Nil(span));
+                };
+                let Some(body) = items.get(2) else {
+                    self.error(
+                        Diagnostic::error("`spawn` needs an expression to run")
+                            .with_code("spawn-form")
+                            .at(span, "expected `(spawn scope expression)`"),
+                    );
+                    return Some(Expr::Nil(span));
+                };
+                let scope = self.expr(scope);
+                Some(Expr::Spawn {
+                    scope: Box::new(scope),
+                    thunk: Box::new(self.thunk(body, span)),
+                    span,
+                })
+            }
             "unsafe" => Some(Expr::Unsafe(Box::new(self.body(&items[1..], span)), span)),
             "async" => Some(Expr::TaskScope {
                 name: "async".to_string(),
@@ -1583,6 +1619,27 @@ impl<'a> Lowerer<'a> {
             }
             _ => Template::Literal(form.clone()),
         }
+    }
+
+    /// Wrap an expression so it runs later rather than now.
+    fn thunk(&mut self, form: &Syntax, span: Span) -> Expr {
+        let body = self.body(std::slice::from_ref(form), span);
+        self.lambda_counter += 1;
+        Expr::Lambda(
+            Rc::new(FnDecl {
+                name: format!("task#{}", self.lambda_counter),
+                params: Vec::new(),
+                ret: None,
+                declared_effects: Effects::NONE,
+                body,
+                is_async: false,
+                is_public: false,
+                is_unsafe: false,
+                doc: None,
+                span,
+            }),
+            span,
+        )
     }
 
     /// `#(...)` — collect `%`, `%1`, `%2` into a parameter list.

@@ -99,6 +99,8 @@ pub struct Function {
     pub body: Block,
     pub effects: Effects,
     pub is_public: bool,
+    /// Calling an async function yields a task rather than running it.
+    pub is_async: bool,
     /// True when the body contains a `recur` targeting this function.
     pub self_recursive: bool,
     pub span: Span,
@@ -237,6 +239,20 @@ pub enum Expr {
     },
     /// `unsafe` is lexical; the backend records it but the body is ordinary.
     Unsafe(Box<Block>, Span),
+    /// A task scope, binding `slot` to the scope for the duration of the body.
+    TaskScope {
+        slot: String,
+        body: Box<Block>,
+        span: Span,
+    },
+    /// Defer a thunk as a task in a scope.
+    Spawn {
+        scope: Box<Expr>,
+        thunk: Box<Expr>,
+        span: Span,
+    },
+    /// Run a task to completion and take its value.
+    Await(Box<Expr>, Span),
     /// Data produced by `'form`.
     Quote(crate::value::Value, Span),
 }
@@ -245,6 +261,10 @@ pub struct Lambda {
     pub name: String,
     pub params: Vec<Param>,
     pub body: Block,
+    /// Enclosing locals the body reads. A backend that compiles a closure to a
+    /// value has to copy these in; the interpreter captures its environment
+    /// directly and ignores the list.
+    pub captures: Vec<String>,
     pub self_recursive: bool,
     pub span: Span,
 }
@@ -429,6 +449,25 @@ impl<'a> Lowerer<'a> {
         self.diagnostics.push(diagnostic);
     }
 
+    /// Which enclosing locals a closure body reads.
+    ///
+    /// Only slots that are actually in scope outside the closure count; a name
+    /// the body binds for itself is not a capture.
+    fn captures_of(&self, body: &Block) -> Vec<String> {
+        let mut referenced = HashSet::new();
+        collect_locals_block(body, &mut referenced);
+        let mut captures: Vec<String> = self
+            .scopes
+            .iter()
+            .flat_map(|scope| scope.iter())
+            .filter(|(_, slot)| referenced.contains(slot))
+            .map(|(_, slot)| slot.clone())
+            .collect();
+        captures.sort();
+        captures.dedup();
+        captures
+    }
+
     fn module(&mut self, module: &ast::Module) -> Module {
         self.module = module.name.clone();
         let mut types = Vec::new();
@@ -541,6 +580,7 @@ impl<'a> Lowerer<'a> {
             body,
             effects: decl.declared_effects,
             is_public: decl.is_public,
+            is_async: decl.is_async,
             self_recursive,
             span: decl.span,
         }
@@ -705,11 +745,13 @@ impl<'a> Lowerer<'a> {
                 self.in_loop = outer_loop;
                 self.saw_self_recur = outer_recur;
                 self.pop_scope();
+                let captures = self.captures_of(&body);
                 Expr::Lambda(
                     Box::new(Lambda {
                         name: decl.name.clone(),
                         params,
                         body,
+                        captures,
                         self_recursive,
                         span: *span,
                     }),
@@ -816,10 +858,19 @@ impl<'a> Lowerer<'a> {
                 Expr::With { slot, value, body, span: *span }
             }
             ast::Expr::Unsafe(body, span) => Expr::Unsafe(Box::new(self.block(body)), *span),
-            // The v0.1 runtime executes async work eagerly, so `await` and task
-            // scopes lower to their bodies. Structured concurrency is Milestone D.
-            ast::Expr::Await(inner, _) => self.expr(inner),
-            ast::Expr::TaskScope { body, span, .. } => Expr::Do(Box::new(self.block(body)), *span),
+            ast::Expr::Await(inner, span) => Expr::Await(Box::new(self.expr(inner)), *span),
+            ast::Expr::Spawn { scope, thunk, span } => Expr::Spawn {
+                scope: Box::new(self.expr(scope)),
+                thunk: Box::new(self.expr(thunk)),
+                span: *span,
+            },
+            ast::Expr::TaskScope { name, body, span } => {
+                self.push_scope();
+                let slot = self.bind(name);
+                let body = self.block(body);
+                self.pop_scope();
+                Expr::TaskScope { slot, body: Box::new(body), span: *span }
+            }
             ast::Expr::Quote(syntax, span) => Expr::Quote(crate::eval::quote_value(syntax), *span),
             ast::Expr::SyntaxQuote(_, span) => {
                 self.error(
@@ -904,6 +955,107 @@ impl<'a> Lowerer<'a> {
             },
             _ => Ref::Global(global_symbol(module, name)),
         }
+    }
+}
+
+/// Collect every local slot a block reads.
+fn collect_locals_block(block: &Block, out: &mut HashSet<String>) {
+    for stmt in &block.stmts {
+        match stmt {
+            Stmt::Let { value, .. } | Stmt::Var { value, .. } => collect_locals(value, out),
+            Stmt::Defer { body, .. } => collect_locals_block(body, out),
+            Stmt::Expr(expr) => collect_locals(expr, out),
+        }
+    }
+}
+
+fn collect_locals(expr: &Expr, out: &mut HashSet<String>) {
+    match expr {
+        Expr::Ref(Ref::Local(slot), _) => {
+            out.insert(slot.clone());
+        }
+        Expr::Assign { slot, value, .. } => {
+            out.insert(slot.clone());
+            collect_locals(value, out);
+        }
+        Expr::Vector(items, _)
+        | Expr::Set(items, _)
+        | Expr::Recur(items, _)
+        | Expr::Concat(items, _)
+        | Expr::And(items, _)
+        | Expr::Or(items, _) => {
+            for item in items {
+                collect_locals(item, out);
+            }
+        }
+        Expr::Map(entries, _) => {
+            for (key, value) in entries {
+                collect_locals(key, out);
+                collect_locals(value, out);
+            }
+        }
+        Expr::Record { fields, .. } => {
+            for (_, value) in fields {
+                collect_locals(value, out);
+            }
+        }
+        Expr::If { cond, then, els, .. } => {
+            collect_locals(cond, out);
+            collect_locals(then, out);
+            if let Some(els) = els {
+                collect_locals(els, out);
+            }
+        }
+        Expr::Do(block, _) | Expr::Unsafe(block, _) | Expr::TaskScope { body: block, .. } => {
+            collect_locals_block(block, out)
+        }
+        // A nested closure's captures are reads of this closure's scope too.
+        Expr::Lambda(lambda, _) => {
+            collect_locals_block(&lambda.body, out);
+        }
+        Expr::Call { callee, args, .. } => {
+            collect_locals(callee, out);
+            for arg in args {
+                collect_locals(&arg.value, out);
+            }
+        }
+        Expr::Field { target, .. } => collect_locals(target, out),
+        Expr::Match { scrutinee, arms, .. } => {
+            collect_locals(scrutinee, out);
+            for arm in arms {
+                if let Some(guard) = &arm.guard {
+                    collect_locals(guard, out);
+                }
+                collect_locals(&arm.body, out);
+            }
+        }
+        Expr::Loop { bindings, body, .. } => {
+            for (_, value) in bindings {
+                collect_locals(value, out);
+            }
+            collect_locals_block(body, out);
+        }
+        Expr::Propagate(inner, _) | Expr::Throw(inner, _) | Expr::Await(inner, _) => {
+            collect_locals(inner, out)
+        }
+        Expr::Spawn { scope, thunk, .. } => {
+            collect_locals(scope, out);
+            collect_locals(thunk, out);
+        }
+        Expr::Try { body, catches, finally, .. } => {
+            collect_locals_block(body, out);
+            for arm in catches {
+                collect_locals_block(&arm.body, out);
+            }
+            if let Some(finally) = finally {
+                collect_locals_block(finally, out);
+            }
+        }
+        Expr::With { value, body, .. } => {
+            collect_locals(value, out);
+            collect_locals_block(body, out);
+        }
+        _ => {}
     }
 }
 
@@ -1226,6 +1378,13 @@ fn render_expr(expr: &Expr, depth: usize) -> String {
         Expr::Unsafe(block, _) => {
             format!("(unsafe\n{}{})", render_block(block, depth + 1), indent(depth))
         }
+        Expr::TaskScope { slot, body, .. } => {
+            format!("(task-scope {slot}\n{}{})", render_block(body, depth + 1), indent(depth))
+        }
+        Expr::Spawn { scope, thunk, .. } => {
+            format!("(spawn {} {})", render_expr(scope, depth), render_expr(thunk, depth))
+        }
+        Expr::Await(inner, _) => format!("(await {})", render_expr(inner, depth)),
         Expr::Quote(value, _) => format!("(quote {value})"),
     }
 }
