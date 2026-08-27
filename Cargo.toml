@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/korben-syntax",
+    "crates/korben-core",
+    "crates/korben-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/leslierussell/korben"
+
+[workspace.dependencies]
+korben-syntax = { path = "crates/korben-syntax" }
+korben-core = { path = "crates/korben-core" }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

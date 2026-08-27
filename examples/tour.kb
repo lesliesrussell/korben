@@ -1,0 +1,92 @@
+;;; A tour of the Korben language as implemented in v0.1.
+;;;
+;;; Run it with `korben run examples/tour.kb`.
+(module tour
+  (use std.string :as string)
+  (use std.json :as json))
+
+; Records are immutable and structurally inferred, with a nominal name at the
+; module boundary.
+(pub type User
+  {id: Int name: String email: Option String})
+
+; Enums are nominal algebraic data types. Matching on them must be exhaustive.
+(pub enum LoginResult
+  (Success user: User)
+  (InvalidCredentials)
+  (Locked minutes: Int))
+
+; Protocols are behaviour contracts with explicit implementations.
+(pub protocol Renderable
+  (render [self] -> String))
+
+(impl Renderable User
+  (fn render [user]
+    (format "User({user.id}, {user.name})")))
+
+; Macros work on syntax objects and are hygienic: a name the template binds can
+; never capture one the caller passed in.
+(macro twice [form]
+  `(do ~form ~form))
+
+;;; Describe a login outcome. The guard arm shows `:when`.
+(fn describe [result: LoginResult] -> String
+  (match result
+    (Success user) (render user)
+    (InvalidCredentials) "invalid credentials"
+    (Locked minutes) :when (> minutes 10) (format "locked for {minutes} minutes")
+    (Locked minutes) (format "locked briefly ({minutes}m)")))
+
+;;; Parse a port, propagating failures to the caller with `?`.
+(fn parse-port [text: String] -> Result Int String
+  (let value (string.parse-int text)?)
+  (if (and (> value 0) (< value 65536)) (Ok value) (Err (format "port out of range: {value}"))))
+
+;;; Sum a vector with a guaranteed tail call.
+(fn sum [values] -> Int
+  (loop [remaining values total 0]
+    (match remaining
+      [] total
+      [head ...tail] (recur tail (+ total head)))))
+
+;;; Named arguments bind by keyword and may carry defaults.
+(fn connect [host: String :port port: Int = 5432 :tls? tls?: Bool = true] -> String
+  (format "{host}:{port} tls={tls?}"))
+
+;;; Mutation is explicit: `var` for a rebindable name, `Cell` for shared state.
+(fn counters [] -> Vec Int
+  (var total 0)
+  (set! total (+ total 5))
+  (let cell (Cell.new 1))
+  (cell.update (fn [n] (* n 10)))
+  [total (cell.get)])
+
+(pub fn main [] -> Unit !io
+  (println (describe (Success (User {id 1 name "Mack" email (Some "mack@example.test")}))))
+  (println (describe (InvalidCredentials)))
+  (println (describe (Locked 30)))
+  (println (describe (Locked 3)))
+
+  (println (parse-port "8080"))
+  (println (parse-port "not-a-port"))
+  (println (parse-port "99999"))
+
+  (println (sum [1 2 3 4 5]))
+  (println (map [1 2 3] (fn-shorthand * % 2)))
+  (println (connect "db.local" :port 6543 :tls? false))
+  (println (connect "db.local"))
+  (println (counters))
+  (println (json.encode {name "Ada" tags ["lisp" "rust"] active true}))
+  (println (cond false :never :else :fallback))
+
+  (twice (println "expanded twice"))
+
+  ; Conditions are exceptional; `Result` is for expected failures.
+  (try
+    (throw "unreachable resource")
+    (catch Condition condition (println "caught:" condition))
+    (finally (println "cleanup ran")))
+
+  ; `defer` runs when the surrounding scope exits, last-in-first-out.
+  (defer (println "deferred, runs last"))
+  (println (if-let n (Some 42) (format "got {n}") "nothing")))

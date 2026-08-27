@@ -1,0 +1,9 @@
+[package]
+name = "korben-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Korben expander, type checker, evaluator, and standard library"
+
+[dependencies]
+korben-syntax.workspace = true

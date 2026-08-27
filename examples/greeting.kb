@@ -1,0 +1,52 @@
+;;; The specification's reference example, adapted to the v0.1 runtime.
+;;;
+;;; Section 29 routes real HTTP requests; `std.http` arrives with the async
+;;; runtime in Milestone D, so this version drives the same handler directly.
+(module greeting
+  (use std.json :as json)
+  (use std.log :as log))
+
+(pub type Request
+  {method: Keyword path: String query: Map Keyword String})
+
+(pub type Response
+  {status: Int body: String})
+
+(pub enum AppError
+  (BadRequest message: String)
+  (Internal cause: String))
+
+;;; Route a request to a response.
+(pub fn greeting-handler [request: Request] -> Result Response AppError
+  (match request
+    {:method :get :path "/health"} (Ok (Response {status 200 body "ok"}))
+
+    {:method :get :path "/greeting" :query {:name name}}
+      (Ok (Response {status 200 body (json.encode {message (format "Hello, {name}")})}))
+
+    {:method :get :path "/greeting"}
+      (Ok (Response {status 200 body (json.encode {message "Hello, world"})}))
+
+    _ (Ok (Response {status 404 body (json.encode {error "not found"})}))))
+
+(pub fn main [] -> Unit !io
+  (log.info "handling requests" {service "greeting"})
+  (let requests
+    [(Request {method :get path "/health" query {}})
+     (Request {method :get path "/greeting" query {:name "Ada"}})
+     (Request {method :get path "/greeting" query {}})
+     (Request {method :get path "/missing" query {}})])
+  (each requests
+        (fn [request]
+          (match (greeting-handler request)
+            (Ok response) (println response.status response.body)
+            (Err error) (println "error:" error)))))
+
+(test "health endpoint is available"
+  (let response (greeting-handler (Request {method :get path "/health" query {}}))?)
+  (assert-eq 200 response.status)
+  (assert-eq "ok" response.body))
+
+(test "unknown paths return 404"
+  (let response (greeting-handler (Request {method :get path "/nope" query {}}))?)
+  (assert-eq 404 response.status))
