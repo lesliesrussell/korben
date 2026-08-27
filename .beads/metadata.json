@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "korben",
+  "project_id": "84cc3f90-64c6-432a-86cb-6e7508eee96f"
+}
