@@ -297,6 +297,40 @@ impl Session {
                     }));
                     define(runtime, &decl.name, value, decl.is_public);
                 }
+                // A foreign declaration becomes an ordinary callable whose body
+                // marshals into the C ABI.
+                Item::Foreign(decl) => {
+                    let signature = korben_runtime::ffi::CSignature {
+                        library: decl.library.clone(),
+                        symbol: decl.symbol.clone(),
+                        params: decl
+                            .c_params
+                            .iter()
+                            .filter_map(|name| korben_runtime::ffi::CType::parse(name))
+                            .collect(),
+                        ret: korben_runtime::ffi::CType::parse(&decl.c_ret)
+                            .unwrap_or(korben_runtime::ffi::CType::Void),
+                    };
+                    let name = decl.name.clone();
+                    let params = decl
+                        .params
+                        .iter()
+                        .map(|param| crate::value::Param {
+                            name: Rc::from(param.name.as_str()),
+                            keyword: None,
+                            has_default: false,
+                        })
+                        .collect();
+                    let value = Value::Fn(Rc::new(crate::value::Function {
+                        name: name.clone(),
+                        params,
+                        body: crate::value::Body::Rust(Box::new(move |_, args, loc| {
+                            let values = args.into_iter().map(|arg| arg.value).collect();
+                            korben_runtime::ffi::call(&signature, values, &name, loc)
+                        })),
+                    }));
+                    define(runtime, &decl.name, value, decl.is_public);
+                }
                 Item::Test(decl) => {
                     self.interp.tests.push((
                         module.name.clone(),

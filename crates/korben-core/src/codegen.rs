@@ -57,6 +57,9 @@ pub fn generate(program: &Program, sources: &SourceMap) -> Result<Generated, Vec
         for function in &module.functions {
             symbols.insert(function.symbol.clone(), Symbol::Function);
         }
+        for foreign in &module.foreign {
+            symbols.insert(foreign.symbol.clone(), Symbol::Function);
+        }
         for konst in &module.consts {
             symbols.insert(konst.symbol.clone(), Symbol::Const);
         }
@@ -105,6 +108,7 @@ use korben_runtime::apply::{
     apply, bad_binding, bind_args, call_member, close_resource, condition_matches, field,
     is_variant, no_match, propagate, report, variant_at, vector_at, vector_from, vector_shape,
 };
+use korben_runtime::ffi::{CSignature, CType};
 use korben_runtime::loc::Loc;
 use korben_runtime::value::{
     display, member, Arg, Body, Caller, Flow, Function, Outcome, Param, Value,
@@ -230,6 +234,9 @@ impl Generator {
             for def in &module.types {
                 let _ = writeln!(self.out, "\n// type {}", def.name);
             }
+            for foreign in &module.foreign {
+                self.foreign(foreign);
+            }
             for function in &module.functions {
                 self.function(function);
             }
@@ -318,6 +325,65 @@ impl Generator {
             );
         }
         let _ = writeln!(self.out, "    ]");
+        let _ = writeln!(self.out, "}}");
+    }
+
+    /// A foreign function compiles to a wrapper that marshals into the C ABI
+    /// through the same runtime the interpreter uses.
+    fn foreign(&mut self, foreign: &ir::ForeignFn) {
+        let symbol = &foreign.symbol;
+        let params: Vec<String> = foreign
+            .params
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                format!(
+                    "Param {{ name: Rc::from(\"a{index}\"), keyword: None, has_default: false }}"
+                )
+            })
+            .collect();
+        let _ = writeln!(self.out, "fn p_{symbol}() -> Vec<Param> {{");
+        let _ = writeln!(self.out, "    vec![{}]", params.join(", "));
+        let _ = writeln!(self.out, "}}");
+
+        let c_params: Vec<String> =
+            foreign.params.iter().map(|ty| format!("CType::{ty:?}")).collect();
+        let _ = writeln!(self.out, "fn s_{symbol}() -> CSignature {{");
+        let _ = writeln!(self.out, "    CSignature {{");
+        let _ = writeln!(self.out, "        library: {}.to_string(),", quote(&foreign.library));
+        let _ = writeln!(self.out, "        symbol: {}.to_string(),", quote(&foreign.c_symbol));
+        let _ = writeln!(self.out, "        params: vec![{}],", c_params.join(", "));
+        let _ = writeln!(self.out, "        ret: CType::{:?},", foreign.ret);
+        let _ = writeln!(self.out, "    }}");
+        let _ = writeln!(self.out, "}}");
+
+        let _ = writeln!(self.out, "fn g_{symbol}() -> Value {{");
+        let _ = writeln!(self.out, "    thread_local! {{");
+        let _ = writeln!(
+            self.out,
+            "        static V: Value = Value::Fn(Rc::new(Function {{ name: {}.to_string(), params: p_{symbol}(), body: Body::Rust(Box::new(f_{symbol})) }}));",
+            quote(&foreign.name)
+        );
+        let _ = writeln!(self.out, "    }}");
+        let _ = writeln!(self.out, "    V.with(|value| value.clone())");
+        let _ = writeln!(self.out, "}}");
+
+        let _ = writeln!(
+            self.out,
+            "fn f_{symbol}(__c: &mut dyn Caller, __args: Vec<Arg>, __loc: Loc) -> Outcome {{"
+        );
+        let _ = writeln!(self.out, "    thread_local! {{");
+        let _ = writeln!(self.out, "        static SIG: CSignature = s_{symbol}();");
+        let _ = writeln!(self.out, "    }}");
+        let _ = writeln!(
+            self.out,
+            "    let values: Vec<Value> = __args.into_iter().map(|arg| arg.value).collect();"
+        );
+        let _ = writeln!(
+            self.out,
+            "    SIG.with(|sig| korben_runtime::ffi::call(sig, values, {}, __loc))",
+            quote(&foreign.name)
+        );
         let _ = writeln!(self.out, "}}");
     }
 
@@ -1150,6 +1216,7 @@ const RUNTIME_FILES: &[(&str, &str)] = &[
     ("src/loc.rs", include_str!("../../korben-runtime/src/loc.rs")),
     ("src/value.rs", include_str!("../../korben-runtime/src/value.rs")),
     ("src/apply.rs", include_str!("../../korben-runtime/src/apply.rs")),
+    ("src/ffi.rs", include_str!("../../korben-runtime/src/ffi.rs")),
     ("src/std.rs", include_str!("../../korben-runtime/src/std.rs")),
     ("src/json.rs", include_str!("../../korben-runtime/src/json.rs")),
 ];

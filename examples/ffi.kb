@@ -1,0 +1,59 @@
+;;; Calling C from Korben.
+;;;
+;;; The declarations below are what `korben ffi c <header> --library c` emits;
+;;; the wrappers under them are the part other Korben code is meant to use.
+;;;
+;;; Run it with `korben run examples/ffi.kb`.
+(module ffi
+  (use std.string :as string))
+
+(ffi/c-library "c")
+
+; A foreign declaration asserts a contract the compiler cannot check, so each
+; one is an `unsafe fn`. Calling it without `unsafe` is an error.
+(ffi/c-fn strlen [text: CStr] -> CULong)
+(ffi/c-fn abs [value: CInt] -> CInt)
+(ffi/c-fn getenv [name: CStr] -> CStr)
+(ffi/c-fn pow [base: CDouble exponent: CDouble] -> CDouble)
+
+;;; Length of a string in bytes, as C counts it.
+;;;
+;;; The signature still carries `!ffi !unsafe`, because specification 22.3 says
+;;; a package may not silently make a caller's safety depend on undocumented
+;;; unsafe code. What the wrapper removes is the need to write `unsafe` at every
+;;; call site, not the fact that unsafe code runs.
+(pub fn byte-length [text: String] -> Int !ffi !unsafe
+  (unsafe (strlen text)))
+
+;;; Absolute value, through C.
+(pub fn absolute [value: Int] -> Int !ffi !unsafe
+  (unsafe (abs value)))
+
+;;; Read an environment variable. C returns null when it is unset, and a null
+;;; `CStr` marshals to `None`, so no null ever reaches Korben code.
+(pub fn environment [name: String] -> Option String !ffi !unsafe
+  (unsafe (getenv name)))
+
+;;; Raise a number to a power, through libm.
+(pub fn power [base: Float64 exponent: Float64] -> Float64 !ffi !unsafe
+  (unsafe (pow base exponent)))
+
+;;; Total byte length of several strings, with one foreign call each.
+(pub fn total-length [items: Vec String] -> Int !ffi !unsafe
+  (reduce items 0 (fn [running text] (+ running (byte-length text)))))
+
+(pub fn main [] -> Unit !io !ffi !unsafe
+  (println (byte-length "korben"))
+  (println (byte-length "unicode: é"))
+  (println (absolute -42))
+  (println (power 2.0 10.0))
+  (println (total-length ["one" "two" "three"]))
+
+  ; A missing variable is `None`, not a crash and not a null.
+  (match (environment "KORBEN_UNSET_VARIABLE")
+    (Some value) (println (format "set to {value}"))
+    (None) (println "not set"))
+
+  ; The wrapper composes with ordinary Korben code.
+  (let words (string.split "alpha,beta,gamma" ","))
+  (println (map words byte-length)))

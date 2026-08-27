@@ -202,6 +202,33 @@ impl Tables {
 
         for module in modules {
             for item in &module.items {
+                if let Item::Foreign(decl) = item {
+                    self.signatures.insert(
+                        decl.name.clone(),
+                        Signature {
+                            params: decl
+                                .params
+                                .iter()
+                                .map(|param| {
+                                    (
+                                        param
+                                            .ty
+                                            .as_ref()
+                                            .map(|ty| self.category(ty))
+                                            .unwrap_or(Category::Value),
+                                        param.keyword.clone(),
+                                    )
+                                })
+                                .collect(),
+                            ret: Some(decl.ret.clone()),
+                            // Specification 17.1: a foreign contract is
+                            // untrusted, so calling one needs `unsafe`.
+                            is_unsafe: true,
+                            span: decl.span,
+                        },
+                    );
+                    continue;
+                }
                 let (name, decl) = match item {
                     Item::Fn(decl) => (decl.name.clone(), decl),
                     _ => continue,

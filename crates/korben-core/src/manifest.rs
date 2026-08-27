@@ -49,6 +49,10 @@ pub struct Manifest {
     pub dev_dependencies: BTreeMap<String, String>,
     /// Capabilities build scripts and macros are granted.
     pub build_capabilities: Vec<String>,
+    /// `[ffi] c = [...]` — C libraries this package links against.
+    pub ffi_c: Vec<String>,
+    /// `[ffi] rust = [...]` — Rust adapter crates.
+    pub ffi_rust: Vec<String>,
     pub path: Option<PathBuf>,
 }
 
@@ -66,6 +70,8 @@ impl Manifest {
             dependencies: BTreeMap::new(),
             dev_dependencies: BTreeMap::new(),
             build_capabilities: Vec::new(),
+            ffi_c: Vec::new(),
+            ffi_rust: Vec::new(),
             path: None,
         }
     }
@@ -111,6 +117,14 @@ impl Manifest {
                     items.iter().filter_map(|item| item.as_str().map(str::to_string)).collect();
             }
         }
+        if let Some(ffi) = tables.get("ffi") {
+            for (key, target) in [("c", &mut manifest.ffi_c), ("rust", &mut manifest.ffi_rust)] {
+                if let Some(TomlValue::Array(items)) = ffi.get(key) {
+                    *target =
+                        items.iter().filter_map(|item| item.as_str().map(str::to_string)).collect();
+                }
+            }
+        }
         for (section, target) in [
             ("dependencies", &mut manifest.dependencies),
             ("dev-dependencies", &mut manifest.dev_dependencies),
@@ -153,11 +167,24 @@ impl Manifest {
         for (name, requirement) in &self.dev_dependencies {
             out.push_str(&format!("{name} = \"{requirement}\"\n"));
         }
+        if !self.ffi_c.is_empty() || !self.ffi_rust.is_empty() {
+            out.push_str("\n[ffi]\n");
+            if !self.ffi_c.is_empty() {
+                out.push_str(&format!("c = [{}]\n", render_list(&self.ffi_c)));
+            }
+            if !self.ffi_rust.is_empty() {
+                out.push_str(&format!("rust = [{}]\n", render_list(&self.ffi_rust)));
+            }
+        }
         out.push_str("\n[build]\n");
         out.push_str(&format!("target = \"{}\"\n", self.target));
         out.push_str(&format!("opt-level = {}\n", self.opt_level));
         out
     }
+}
+
+fn render_list(items: &[String]) -> String {
+    items.iter().map(|item| format!("\"{item}\"")).collect::<Vec<_>>().join(", ")
 }
 
 type Table = BTreeMap<String, TomlValue>;

@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.4.0 — C interoperation
+
+`korben check` and `korben run` can now consume a C library through a
+generated, typed binding and a safe wrapper, closing v0.1 acceptance
+criterion 8.
+
+### Added
+
+- **Foreign declarations**: `(ffi/c-library "name")` selects a library and
+  `(ffi/c-fn name ["symbol"] [params] -> CRet)` declares a function over the C
+  types `CVoid`, `CBool`, `CChar`, `CInt`, `CUInt`, `CLong`, `CULong`,
+  `CFloat`, `CDouble`, `CStr`, and `Ptr`.
+- **Containment per specification 17.1 and 12.7.** A declaration asserts a
+  contract the compiler cannot verify, so it is an `unsafe fn` carrying `!ffi`
+  and `!unsafe`. Calling one from safe code is an error naming the fix. Safe
+  Korben wrappers are the ordinary user-facing form, and their signatures still
+  carry the effects, because 22.3 forbids hiding unsafe implementation from a
+  caller.
+- **No foreign null reaches Korben.** A `CStr` or `Ptr` return surfaces as an
+  `Option`, so a null becomes `None` rather than something that can be
+  dereferenced.
+- **Dynamic loading and typed invocation** in `korben-runtime`, shared by both
+  execution modes: a native executable and the interpreter call foreign code
+  through the same code path.
+- **`korben ffi c <header>`**: a binding generator over the C prototype subset
+  that appears in ordinary headers. Prototypes it cannot type — variadics,
+  function pointers, structs by value — are listed with a reason rather than
+  guessed at.
+- **`korben ffi`** lists a project's foreign declarations with their libraries
+  and signatures.
+- An `[ffi]` manifest section declaring linked C libraries and Rust adapters;
+  `korben doctor` reports them.
+- `examples/ffi.kb`.
+
+### Not in this release
+
+The Rust adapter ABI from specification 17.3, foreign callbacks, structs passed
+by value, and ownership transfer across the foreign boundary. Foreign calls are
+Unix-only, and a signature must be all-integer or all-floating: the C ABI passes
+those classes in different registers, so a mixed signature is rejected with an
+explanation rather than called incorrectly.
+
 ## 0.3.0 — Ownership and borrowing
 
 `korben check` now reports ownership violations, closing the last part of v0.1

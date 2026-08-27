@@ -45,6 +45,7 @@ pub fn run(args: &[String]) -> ExitCode {
         "doctor" => cmd_doctor(rest),
         "inspect" => cmd_inspect(rest),
         "dev" => cmd_dev(rest),
+        "ffi" => cmd_ffi(rest),
         other => {
             if let Some(milestone) = planned_command(other) {
                 eprintln!(
@@ -69,7 +70,6 @@ fn planned_command(name: &str) -> Option<&'static str> {
         }
         "bench" => "Milestone D (benchmark harness)",
         "lsp" => "Milestone B (language server)",
-        "ffi" => "Milestone C (C and Rust binding generation)",
         _ => return None,
     })
 }
@@ -94,6 +94,7 @@ fn print_help() {
     println!("  expand <file>                             show macro expansion");
     println!("  doc [--out <dir>]                         generate documentation");
     println!("  inspect                                   show the resolved project model");
+    println!("  ffi [c <header>]                          list or generate foreign bindings");
     println!("  build [--release] [--emit ir|rust]        compile to a native executable\n");
     println!("{}", ui::bold("OTHER"));
     println!("  version                                   print the toolchain version");
@@ -851,6 +852,126 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
+// ---------------------------------------------------------------------- ffi
+
+fn cmd_ffi(args: &[String]) -> ExitCode {
+    let flags = Flags::parse(args);
+    match flags.positional.first().map(String::as_str) {
+        Some("c") => cmd_ffi_c(&flags),
+        Some(other) => {
+            eprintln!("{} unknown `korben ffi` subcommand `{other}`", ui::red("error:"));
+            eprintln!("  Use `korben ffi` to list bindings, or `korben ffi c <header>`.");
+            ExitCode::from(2)
+        }
+        None => cmd_ffi_list(&flags),
+    }
+}
+
+/// Show every foreign declaration the project makes, and what it links.
+fn cmd_ffi_list(flags: &Flags) -> ExitCode {
+    let mut session = match open_session(flags) {
+        Ok(session) => session,
+        Err(code) => return code,
+    };
+    load_all(&mut session, flags);
+    if ui::report(&session.diagnostics, &session.sources, false) {
+        return ExitCode::FAILURE;
+    }
+
+    if !session.manifest.ffi_c.is_empty() {
+        println!("{} {}", ui::bold("linked C libraries:"), session.manifest.ffi_c.join(", "));
+    }
+    if !session.manifest.ffi_rust.is_empty() {
+        println!(
+            "{} {}",
+            ui::yellow("declared Rust adapters:"),
+            session.manifest.ffi_rust.join(", ")
+        );
+        println!("  {}", ui::dim("the Rust adapter ABI is not implemented yet"));
+    }
+
+    let mut total = 0usize;
+    for module in &session.modules {
+        let foreign: Vec<&korben_core::ast::ForeignDecl> = module
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                korben_core::ast::Item::Foreign(decl) => Some(&**decl),
+                _ => None,
+            })
+            .collect();
+        if foreign.is_empty() {
+            continue;
+        }
+        println!("\n{}", ui::bold(&module.name));
+        for decl in foreign {
+            total += 1;
+            let visibility = if decl.is_public { "pub " } else { "" };
+            println!(
+                "  {visibility}{} {}",
+                decl.name,
+                ui::dim(&format!("-> {} [{}]", decl.c_ret, decl.library))
+            );
+            println!("      {}", ui::dim(&korben_core::docs::foreign_signature(decl)));
+        }
+    }
+    if total == 0 {
+        println!("{} this project declares no foreign functions", ui::dim("note:"));
+    } else {
+        println!("\n{} {total} foreign declaration{}", ui::green("total:"), ui::plural(total));
+    }
+    ExitCode::SUCCESS
+}
+
+/// Generate a binding module from a C header.
+fn cmd_ffi_c(flags: &Flags) -> ExitCode {
+    let Some(header) = flags.positional.get(1) else {
+        eprintln!("{} `korben ffi c` needs a header file", ui::red("error:"));
+        eprintln!("  korben ffi c <header.h> --library <name> [--module <name>] [--out <file>]");
+        return ExitCode::from(2);
+    };
+    let path = PathBuf::from(header);
+    let Ok(source) = std::fs::read_to_string(&path) else {
+        eprintln!("{} cannot read {}", ui::red("error:"), path.display());
+        return ExitCode::FAILURE;
+    };
+    let stem = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+        .unwrap_or_else(|| "bindings".to_string());
+    let library = flags.value("library").unwrap_or(&stem).to_string();
+    let module = flags.value("module").unwrap_or(&stem).to_string();
+
+    let extracted = korben_core::cheader::extract(&source);
+    let rendered =
+        korben_core::cheader::render(&module, &library, &path.display().to_string(), &extracted);
+
+    match flags.value("out") {
+        Some(out) => {
+            if let Err(error) = std::fs::write(out, &rendered) {
+                eprintln!("{} cannot write {out}: {error}", ui::red("error:"));
+                return ExitCode::FAILURE;
+            }
+            println!(
+                "{} {} binding{} to {out}",
+                ui::green("generated"),
+                extracted.bindings.len(),
+                ui::plural(extracted.bindings.len())
+            );
+        }
+        None => print!("{rendered}"),
+    }
+    if !extracted.skipped.is_empty() {
+        eprintln!(
+            "{} {} declaration{} could not be typed and were skipped",
+            ui::yellow("note:"),
+            extracted.skipped.len(),
+            ui::plural(extracted.skipped.len())
+        );
+    }
+    ExitCode::SUCCESS
+}
+
 // ----------------------------------------------------------- doctor/inspect
 
 fn cmd_doctor(args: &[String]) -> ExitCode {
@@ -882,6 +1003,9 @@ fn cmd_doctor(args: &[String]) -> ExitCode {
                             ui::yellow("warning:"),
                             manifest.edition
                         );
+                    }
+                    if !manifest.ffi_c.is_empty() {
+                        println!("  links        {}", manifest.ffi_c.join(", "));
                     }
                     if !manifest.dependencies.is_empty() {
                         println!(
@@ -945,6 +1069,7 @@ fn cmd_inspect(args: &[String]) -> ExitCode {
                 korben_core::ast::Item::Macro(_) => "macro",
                 korben_core::ast::Item::Test(_) => "test",
                 korben_core::ast::Item::Derive(_) => "derive",
+                korben_core::ast::Item::Foreign(_) => "ffi/c-fn",
                 korben_core::ast::Item::Const { .. } => "def",
             };
             let visibility = match item {
@@ -1077,5 +1202,5 @@ impl Flags {
 }
 
 fn takes_value(name: &str) -> bool {
-    matches!(name, "template" | "out" | "target" | "emit" | "filter")
+    matches!(name, "template" | "out" | "target" | "emit" | "filter" | "library" | "module")
 }

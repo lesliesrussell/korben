@@ -147,6 +147,17 @@ pub fn signature(decl: &FnDecl) -> String {
     format!("({keyword} {} [{}]{ret}{effects})", decl.name, params.join(" "))
 }
 
+/// The declaration form of a foreign function, for `korben ffi` and docs.
+pub fn foreign_signature(decl: &crate::ast::ForeignDecl) -> String {
+    let params: Vec<String> = decl
+        .params
+        .iter()
+        .zip(&decl.c_params)
+        .map(|(param, c_type)| format!("{}: {c_type}", param.name))
+        .collect();
+    format!("(ffi/c-fn {} [{}] -> {})", decl.name, params.join(" "), decl.c_ret)
+}
+
 pub fn render_type(ty: &TypeExpr) -> String {
     match ty {
         TypeExpr::Name(name, args, _) if args.is_empty() => name.clone(),

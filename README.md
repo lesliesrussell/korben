@@ -35,6 +35,7 @@ One executable covers the standard workflow. Every command works on a project
 | `korben expand <file>` | Print macro expansion through the formatter |
 | `korben doc [--out <dir>]` | Markdown docs plus a machine-readable `api.json` |
 | `korben inspect` | The resolved project model |
+| `korben ffi [c <header>]` | List or generate foreign bindings |
 | `korben doctor` | Toolchain and project health |
 | `korben build [--release] [--emit ir\|rust]` | Compile to a native executable |
 
@@ -122,6 +123,12 @@ specification's reference example adapted to what exists.
   unify with the nominal types they match, tuple inference for heterogeneous
   vector literals, effect inference (`!io`, `!async`, `!alloc`, `!ffi`,
   `!unsafe`), and `--strict-api` for complete public signatures.
+- **C interoperation.** `(ffi/c-library ...)` and `(ffi/c-fn ...)` declare typed
+  foreign functions; `korben ffi c <header>` generates them from C prototypes.
+  A declaration asserts a contract the compiler cannot verify, so it is an
+  `unsafe fn` carrying `!ffi` and `!unsafe` — safe Korben wrappers are the
+  ordinary user-facing form. A null `CStr` or pointer marshals to `None`, so
+  foreign null never becomes a Korben value. `examples/ffi.kb` calls libc.
 - Standard library: `std.core`, `std.string`, `std.math`, `std.io`, `std.fs`,
   `std.json`, `std.log`, `std.time`, `std.process`, `std.test`, `std.syntax`.
   `fs.open` and `fs.create` return a `File`, a real resource that `with` closes
@@ -157,6 +164,8 @@ Implemented:
 - A direct interpreter over the typed AST.
 - Core IR, and a native backend that produces standalone executables.
 - Ownership, move, and borrow analysis with `Drop`-based resource types.
+- C FFI: typed declarations, a binding generator, and dynamic library loading
+  shared by both execution modes.
 - Canonical formatter, linter, documentation generator, project-aware REPL.
 - `new`, `init`, `run`, `dev`, `check`, `test`, `fmt`, `lint`, `repl`, `expand`,
   `doc`, `inspect`, `doctor`, `build`.
@@ -173,7 +182,15 @@ Not yet implemented, and reported as such rather than stubbed silently:
   across a function boundary, so returning a borrow is checked by types alone.
 - **`Shared` and `Managed`.** Both are recognized as ownership categories, but
   neither has a runtime representation yet, so there is no way to construct one.
-- **FFI** (Milestone C). `korben ffi` reports the milestone it lands in.
+- **The Rust adapter ABI** (specification 17.3). `[ffi] rust = [...]` parses and
+  `korben ffi` reports it, but the `korben-export` adapter is not implemented.
+  C interoperation is complete enough to consume a Rust library through a
+  `#[no_mangle] extern "C"` surface.
+- **Foreign callbacks and structs by value.** A pointer is carried opaquely,
+  never dereferenced, and never freed on Korben's behalf; specification 17.1's
+  ownership-transfer annotations are not implemented. Function pointers and
+  structs passed or returned by value are declined by the generator rather than
+  guessed at.
 - **Package management** (Milestone D). Manifests parse dependencies and the
   lockfile format is specified, but `add`, `remove`, `update`, `publish`,
   `install`, and `audit` report the milestone they land in.
@@ -182,10 +199,17 @@ Not yet implemented, and reported as such rather than stubbed silently:
 - **Restart-case conditions.** Typed conditions and handlers work; named restart
   points do not.
 
-Two sharp edges worth knowing:
+Sharp edges worth knowing:
 
 - Building natively needs `cargo` on `PATH`, because the backend compiles
   generated Rust. `korben run` needs nothing.
+- Foreign calls are Unix-only, and a signature must be all-integer (up to eight
+  parameters) or all-floating (up to four). The C ABI passes the two classes in
+  different registers, so a mixed signature is rejected with an explanation
+  rather than called incorrectly.
+- `korben ffi c` reads the prototype subset that appears in ordinary headers.
+  Extraction through libclang, which would follow typedefs and macros, is future
+  work; declarations it cannot type are listed rather than guessed at.
 - A string literal inside a `{...}` interpolation hole must be escaped:
   `(format "{(str \"a\" \"b\")}")`. Write `{{` and `}}` for literal braces.
 
@@ -215,8 +239,8 @@ native builds reproducible and offline.
 ## Development
 
 ```sh
-cargo test              # 124 tests: reader, formatter, evaluator, checker,
-                        # ownership, CLI, and interpreter-vs-native
+cargo test              # 148 tests: reader, formatter, evaluator, checker,
+                        # ownership, FFI, CLI, and interpreter-vs-native
                         # differential tests
 cargo clippy --workspace --all-targets
 cargo fmt

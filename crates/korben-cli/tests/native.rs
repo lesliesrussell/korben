@@ -328,3 +328,29 @@ fn a_program_without_main_is_rejected_before_generating_code() {
     assert!(!built.status.success());
     assert!(combined(&built).contains("defines no `main`"), "{}", combined(&built));
 }
+
+#[test]
+fn foreign_calls_agree_between_execution_modes() {
+    assert_same(
+        "ffi",
+        "ffi",
+        r#"(module ffi)
+
+(ffi/c-library "c")
+(ffi/c-fn strlen [text: CStr] -> CULong)
+(ffi/c-fn abs [value: CInt] -> CInt)
+(ffi/c-fn pow [base: CDouble exponent: CDouble] -> CDouble)
+(ffi/c-fn getenv [name: CStr] -> CStr)
+
+(pub fn byte-length [text: String] -> Int !ffi !unsafe
+  (unsafe (strlen text)))
+
+(pub fn main [] -> Unit !io !ffi !unsafe
+  (println (byte-length "korben"))
+  (println (unsafe (abs -42)))
+  (println (unsafe (pow 2.0 10.0)))
+  (println (unsafe (getenv "KORBEN_UNSET_VARIABLE")))
+  (println (map ["one" "three"] byte-length)))
+"#,
+    );
+}

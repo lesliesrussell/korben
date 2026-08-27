@@ -663,6 +663,27 @@ impl Checker {
                         ty.as_ref().map(|ty| self.lower_type(ty, &[])).unwrap_or(Type::Unknown);
                     self.globals.insert(name.clone(), Scheme::mono(ty));
                 }
+                // A foreign declaration is an unsafe function that performs a
+                // foreign call, so its signature carries both effects.
+                Item::Foreign(decl) => {
+                    let params: Vec<Type> = decl
+                        .params
+                        .iter()
+                        .map(|param| match &param.ty {
+                            Some(ty) => self.lower_type(ty, &[]),
+                            None => Type::Unknown,
+                        })
+                        .collect();
+                    let ret = self.lower_type(&decl.ret, &[]);
+                    self.globals.insert(
+                        decl.name.clone(),
+                        Scheme::mono(Type::function(
+                            params,
+                            ret,
+                            Effects(EFFECT_FFI | EFFECT_UNSAFE),
+                        )),
+                    );
+                }
                 _ => {}
             }
         }

@@ -309,3 +309,87 @@ fn the_bundled_examples_run_check_and_format_cleanly() {
     }
     assert!(ran >= 2, "expected the examples directory to have examples");
 }
+
+#[test]
+fn ffi_generates_bindings_from_a_header_and_lists_them() {
+    let scratch = Scratch::new("ffi");
+    assert!(korben(scratch.path(), &["new", "app"]).status.success());
+    let project = scratch.path().join("app");
+    std::fs::remove_file(project.join("src/main.kb")).unwrap();
+    std::fs::remove_file(project.join("tests/main_test.kb")).unwrap();
+    std::fs::write(project.join("libc.h"), "size_t strlen(const char *s);\nint abs(int value);\n")
+        .unwrap();
+
+    // Generate a binding module from the header.
+    let generated = korben(
+        &project,
+        &[
+            "ffi",
+            "c",
+            "libc.h",
+            "--library",
+            "c",
+            "--module",
+            "bindings",
+            "--out",
+            "src/bindings.kb",
+        ],
+    );
+    assert!(generated.status.success(), "{}", combined(&generated));
+    assert!(stdout(&generated).contains("2 bindings"), "{}", stdout(&generated));
+
+    let module = std::fs::read_to_string(project.join("src/bindings.kb")).unwrap();
+    assert!(module.contains("(ffi/c-library \"c\")"), "{module}");
+    assert!(module.contains("(pub ffi/c-fn strlen [s: CStr] -> CULong)"), "{module}");
+
+    // Write a safe wrapper over the generated bindings and run it.
+    std::fs::write(
+        project.join("src/main.kb"),
+        r#"(module main
+  (use bindings [strlen abs]))
+
+;;; Length of a string in bytes, as C counts it.
+(pub fn byte-length [text: String] -> Int !ffi !unsafe
+  (unsafe (strlen text)))
+
+(pub fn main [] -> Unit !io !ffi !unsafe
+  (println (byte-length "korben"))
+  (println (unsafe (abs -9))))
+"#,
+    )
+    .unwrap();
+
+    let check = korben(&project, &["check"]);
+    assert!(check.status.success(), "{}", combined(&check));
+
+    let run = korben(&project, &["run"]);
+    assert!(run.status.success(), "{}", combined(&run));
+    assert_eq!(stdout(&run), "6\n9\n");
+
+    // `korben ffi` reports what the project declares.
+    let listed = korben(&project, &["ffi"]);
+    assert!(listed.status.success(), "{}", combined(&listed));
+    let text = stdout(&listed);
+    assert!(text.contains("strlen"), "{text}");
+    assert!(text.contains("(ffi/c-fn strlen [s: CStr] -> CULong)"), "{text}");
+    assert!(text.contains("2 foreign declarations"), "{text}");
+}
+
+#[test]
+fn calling_a_foreign_function_without_unsafe_is_rejected() {
+    let scratch = Scratch::new("ffisafe");
+    assert!(korben(scratch.path(), &["new", "app"]).status.success());
+    let project = scratch.path().join("app");
+    std::fs::remove_file(project.join("tests/main_test.kb")).unwrap();
+    std::fs::write(
+        project.join("src/main.kb"),
+        "(module main)\n\n(ffi/c-library \"c\")\n(ffi/c-fn abs [value: CInt] -> CInt)\n\n(pub fn main [] -> Unit !io !ffi !unsafe (println (abs -1)))\n",
+    )
+    .unwrap();
+
+    let check = korben(&project, &["check"]);
+    assert!(!check.status.success());
+    let text = combined(&check);
+    assert!(text.contains("unsafe-call"), "{text}");
+    assert!(text.contains("wrap this in `(unsafe ...)`"), "{text}");
+}

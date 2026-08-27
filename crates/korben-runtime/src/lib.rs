@@ -8,6 +8,7 @@
 // korben-vtx
 
 pub mod apply;
+pub mod ffi;
 pub mod json;
 pub mod loc;
 pub mod std;

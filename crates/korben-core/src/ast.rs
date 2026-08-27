@@ -194,6 +194,29 @@ pub struct TestDecl {
     pub span: Span,
 }
 
+/// A foreign function declared with `(ffi/c-fn ...)`.
+///
+/// The declaration asserts a contract the compiler cannot verify, so it is an
+/// `unsafe fn` carrying `!ffi` and `!unsafe`. Safe Korben wrappers are the
+/// ordinary user-facing form, per specification 17.1.
+#[derive(Clone, Debug)]
+pub struct ForeignDecl {
+    /// The Korben name.
+    pub name: String,
+    /// The symbol to resolve in the library.
+    pub symbol: String,
+    pub library: String,
+    /// Parameters carrying the Korben-facing types.
+    pub params: Vec<Param>,
+    /// The C type of each parameter, as written.
+    pub c_params: Vec<String>,
+    pub ret: TypeExpr,
+    pub c_ret: String,
+    pub is_public: bool,
+    pub doc: Option<String>,
+    pub span: Span,
+}
+
 #[derive(Clone, Debug)]
 pub struct DeriveDecl {
     pub type_name: String,
@@ -210,6 +233,7 @@ pub enum Item {
     Macro(Rc<MacroDecl>),
     Test(Rc<TestDecl>),
     Derive(DeriveDecl),
+    Foreign(Rc<ForeignDecl>),
     /// `(def name value)` — a module-level constant.
     Const {
         name: String,
@@ -231,6 +255,7 @@ impl Item {
             Item::Macro(decl) => &decl.name,
             Item::Test(decl) => &decl.name,
             Item::Derive(decl) => &decl.type_name,
+            Item::Foreign(decl) => &decl.name,
             Item::Const { name, .. } => name,
         }
     }
@@ -244,6 +269,7 @@ impl Item {
             Item::Macro(decl) => decl.span,
             Item::Test(decl) => decl.span,
             Item::Derive(decl) => decl.span,
+            Item::Foreign(decl) => decl.span,
             Item::Const { span, .. } => *span,
         }
     }
@@ -254,6 +280,7 @@ impl Item {
             Item::Type(decl) => decl.is_public,
             Item::Protocol(decl) => decl.is_public,
             Item::Macro(decl) => decl.is_public,
+            Item::Foreign(decl) => decl.is_public,
             Item::Const { is_public, .. } => *is_public,
             Item::Impl(_) | Item::Test(_) | Item::Derive(_) => true,
         }

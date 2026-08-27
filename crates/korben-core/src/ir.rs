@@ -30,6 +30,7 @@ pub struct Module {
     pub name: String,
     pub types: Vec<TypeDef>,
     pub functions: Vec<Function>,
+    pub foreign: Vec<ForeignFn>,
     pub consts: Vec<Const>,
     pub impls: Vec<ImplDef>,
     pub protocols: Vec<ProtocolDef>,
@@ -58,6 +59,17 @@ pub struct Variant {
     pub name: String,
     pub symbol: String,
     pub fields: Vec<String>,
+}
+
+/// A foreign function, resolved at run time through the library it names.
+pub struct ForeignFn {
+    pub name: String,
+    pub symbol: String,
+    pub library: String,
+    pub c_symbol: String,
+    pub params: Vec<korben_runtime::ffi::CType>,
+    pub ret: korben_runtime::ffi::CType,
+    pub span: Span,
 }
 
 pub struct ProtocolDef {
@@ -421,6 +433,7 @@ impl<'a> Lowerer<'a> {
         self.module = module.name.clone();
         let mut types = Vec::new();
         let mut functions = Vec::new();
+        let mut foreign = Vec::new();
         let mut consts = Vec::new();
         let mut impls = Vec::new();
         let mut protocols = Vec::new();
@@ -462,12 +475,26 @@ impl<'a> Lowerer<'a> {
                         methods,
                     });
                 }
+                ast::Item::Foreign(decl) => foreign.push(ForeignFn {
+                    name: decl.name.clone(),
+                    symbol: global_symbol(&module.name, &decl.name),
+                    library: decl.library.clone(),
+                    c_symbol: decl.symbol.clone(),
+                    params: decl
+                        .c_params
+                        .iter()
+                        .filter_map(|name| korben_runtime::ffi::CType::parse(name))
+                        .collect(),
+                    ret: korben_runtime::ffi::CType::parse(&decl.c_ret)
+                        .unwrap_or(korben_runtime::ffi::CType::Void),
+                    span: decl.span,
+                }),
                 // Tests belong to the test runner, and macros are already expanded.
                 ast::Item::Test(_) | ast::Item::Macro(_) | ast::Item::Derive(_) => {}
             }
         }
 
-        Module { name: module.name.clone(), types, functions, consts, impls, protocols }
+        Module { name: module.name.clone(), types, functions, foreign, consts, impls, protocols }
     }
 
     fn type_def(&mut self, decl: &ast::TypeDecl) -> TypeDef {
@@ -928,6 +955,18 @@ pub fn render(program: &Program) -> String {
         for def in &module.consts {
             let _ = writeln!(out, "  (const {} {}", def.symbol, render_expr(&def.value, 2));
             let _ = writeln!(out, "  )");
+        }
+        for foreign in &module.foreign {
+            let params: Vec<String> = foreign.params.iter().map(|ty| format!("{ty:?}")).collect();
+            let _ = writeln!(
+                out,
+                "  (foreign {} \"{}\" \"{}\" [{}] -> {:?})",
+                foreign.symbol,
+                foreign.library,
+                foreign.c_symbol,
+                params.join(" "),
+                foreign.ret
+            );
         }
         for function in &module.functions {
             let params: Vec<String> = function

@@ -6,6 +6,7 @@
 pub mod ast;
 pub mod builtins;
 pub mod bundle;
+pub mod cheader;
 pub mod codegen;
 pub mod docs;
 pub mod eval;

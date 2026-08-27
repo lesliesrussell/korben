@@ -55,6 +55,8 @@ pub struct Lowerer<'a> {
     pub diagnostics: &'a mut Diagnostics,
     file: FileId,
     lambda_counter: usize,
+    /// The library named by the most recent `(ffi/c-library ...)`.
+    current_library: Option<String>,
 }
 
 /// Lower a whole file into a module.
@@ -64,7 +66,7 @@ pub fn lower_module(
     forms: &[Syntax],
     diagnostics: &mut Diagnostics,
 ) -> Module {
-    let mut lowerer = Lowerer { diagnostics, file, lambda_counter: 0 };
+    let mut lowerer = Lowerer { diagnostics, file, lambda_counter: 0, current_library: None };
     lowerer.module(default_name, forms)
 }
 
@@ -127,6 +129,19 @@ impl<'a> Lowerer<'a> {
                 Some("use") => {
                     if let Some(import) = self.import(form) {
                         module.imports.push(import);
+                    }
+                }
+                // `(ffi/c-library "name")` selects the library that the
+                // declarations after it resolve against.
+                Some("ffi/c-library") => {
+                    let items = form.as_list().unwrap();
+                    match items.get(1).and_then(Syntax::as_str) {
+                        Some(name) => self.current_library = Some(name.to_string()),
+                        None => self.error(
+                            Diagnostic::error("`ffi/c-library` needs a library name")
+                                .with_code("ffi-library")
+                                .at(form.span, "expected `(ffi/c-library \"sqlite3\")`"),
+                        ),
                     }
                 }
                 _ => {
@@ -260,6 +275,9 @@ impl<'a> Lowerer<'a> {
             "test" => self.test_decl(form, items, false).map(|decl| Item::Test(Rc::new(decl))),
             "property" => self.test_decl(form, items, true).map(|decl| Item::Test(Rc::new(decl))),
             "derive" => self.derive_decl(form, items).map(Item::Derive),
+            "ffi/c-fn" => self
+                .foreign_decl(form, items, is_public, doc)
+                .map(|decl| Item::Foreign(Rc::new(decl))),
             "def" => {
                 let Some(name) = items.get(1).and_then(Syntax::as_symbol) else {
                     self.error(
@@ -884,6 +902,117 @@ impl<'a> Lowerer<'a> {
         }
         let body = self.body(&items[index..], form.span);
         Some(TestDecl { name: name.to_string(), generators, body, span: form.span })
+    }
+
+    /// `(ffi/c-fn name ["symbol"] [params] -> CRet)`
+    fn foreign_decl(
+        &mut self,
+        form: &Syntax,
+        items: &[Syntax],
+        is_public: bool,
+        doc: Option<String>,
+    ) -> Option<ForeignDecl> {
+        let Some(name) = items.get(1).and_then(Syntax::as_symbol) else {
+            self.error(
+                Diagnostic::error("`ffi/c-fn` needs a name")
+                    .with_code("ffi-declaration")
+                    .at(form.span, "expected `(ffi/c-fn name [params] -> CInt)`"),
+            );
+            return None;
+        };
+        let Some(library) = self.current_library.clone() else {
+            self.error(
+                Diagnostic::error("no library has been declared")
+                    .with_code("ffi-library")
+                    .at(form.span, "this declaration has nothing to resolve against")
+                    .help("add `(ffi/c-library \"name\")` above it"),
+            );
+            return None;
+        };
+
+        let mut index = 2usize;
+        // An explicit symbol lets the Korben name differ from the C one.
+        let symbol = match items.get(index).and_then(Syntax::as_str) {
+            Some(symbol) => {
+                index += 1;
+                symbol.to_string()
+            }
+            None => name.replace('-', "_"),
+        };
+
+        let params = match items.get(index) {
+            Some(vector) if matches!(vector.datum, Datum::Vector(_)) => {
+                index += 1;
+                self.params(vector)
+            }
+            _ => {
+                self.error(
+                    Diagnostic::error(format!("`{name}` needs a parameter vector"))
+                        .with_code("ffi-declaration")
+                        .at(form.span, "expected `[name: CType ...]`"),
+                );
+                return None;
+            }
+        };
+        let (ret, _) = self.return_annotation(items, &mut index);
+        let Some(ret) = ret else {
+            self.error(
+                Diagnostic::error(format!("`{name}` needs a return type"))
+                    .with_code("ffi-declaration")
+                    .at(form.span, "expected `-> CInt`, `-> CVoid`, and so on"),
+            );
+            return None;
+        };
+
+        // Translate the declared C types into the Korben types they surface as.
+        let mut c_params = Vec::with_capacity(params.len());
+        let mut korben_params = Vec::with_capacity(params.len());
+        for param in &params {
+            let Some(ty) = &param.ty else {
+                self.error(
+                    Diagnostic::error(format!("parameter `{}` has no C type", param.name))
+                        .with_code("ffi-declaration")
+                        .at(param.span, "every foreign parameter must be annotated"),
+                );
+                return None;
+            };
+            let Some(c_name) = c_type_name(ty) else {
+                self.error(self.bad_c_type(ty));
+                return None;
+            };
+            let mut param = param.clone();
+            param.ty = Some(korben_param_type(&c_name, ty.span()));
+            korben_params.push(param);
+            c_params.push(c_name);
+        }
+        let Some(c_ret) = c_type_name(&ret) else {
+            self.error(self.bad_c_type(&ret));
+            return None;
+        };
+        let korben_ret = korben_return_type(&c_ret, ret.span());
+
+        Some(ForeignDecl {
+            name: name.to_string(),
+            symbol,
+            library,
+            params: korben_params,
+            c_params,
+            ret: korben_ret,
+            c_ret,
+            is_public,
+            doc,
+            span: form.span,
+        })
+    }
+
+    fn bad_c_type(&self, ty: &TypeExpr) -> Diagnostic {
+        Diagnostic::error(format!("`{}` is not a C type", crate::docs::render_type(ty)))
+            .with_code("ffi-type")
+            .at(ty.span(), "unsupported in a foreign declaration")
+            .help(
+                "C types are CVoid, CBool, CChar, CInt, CUInt, CLong, CULong, CFloat, CDouble, \
+                 CStr, and Ptr",
+            )
     }
 
     fn derive_decl(&mut self, form: &Syntax, items: &[Syntax]) -> Option<DeriveDecl> {
@@ -1689,7 +1818,7 @@ impl<'a> Lowerer<'a> {
 
 /// Lower a single expression outside a module, used by the REPL.
 pub fn lower_expr(file: FileId, form: &Syntax, diagnostics: &mut Diagnostics) -> Expr {
-    let mut lowerer = Lowerer { diagnostics, file, lambda_counter: 0 };
+    let mut lowerer = Lowerer { diagnostics, file, lambda_counter: 0, current_library: None };
     lowerer.expr(form)
 }
 
@@ -1700,7 +1829,7 @@ pub fn lower_body(
     span: Span,
     diagnostics: &mut Diagnostics,
 ) -> Body {
-    let mut lowerer = Lowerer { diagnostics, file, lambda_counter: 0 };
+    let mut lowerer = Lowerer { diagnostics, file, lambda_counter: 0, current_library: None };
     lowerer.body(forms, span)
 }
 
@@ -1771,6 +1900,43 @@ fn retarget_spans(form: &mut Syntax, span: Span) {
         }
         Datum::Tagged(_, inner) => retarget_spans(inner, span),
         _ => {}
+    }
+}
+
+/// The C type a declaration's annotation names, if it names one.
+fn c_type_name(ty: &TypeExpr) -> Option<String> {
+    let TypeExpr::Name(name, _, _) = ty else { return None };
+    let short = name.rsplit(['.', '/']).next().unwrap_or(name);
+    korben_runtime::ffi::CType::parse(short).map(|_| short.to_string())
+}
+
+/// What a C parameter type looks like to Korben code.
+fn korben_param_type(c_name: &str, span: Span) -> TypeExpr {
+    let ty = korben_runtime::ffi::CType::parse(c_name).expect("checked by the caller");
+    let name = match ty {
+        korben_runtime::ffi::CType::Str => "String",
+        korben_runtime::ffi::CType::Ptr => "Ptr",
+        _ => return korben_return_type(c_name, span),
+    };
+    TypeExpr::Name(name.to_string(), Vec::new(), span)
+}
+
+/// What a C return type looks like to Korben code. A nullable string or
+/// pointer surfaces as an `Option`, so foreign null never becomes a Korben value.
+fn korben_return_type(c_name: &str, span: Span) -> TypeExpr {
+    let ty = korben_runtime::ffi::CType::parse(c_name).expect("checked by the caller");
+    match ty {
+        korben_runtime::ffi::CType::Str => TypeExpr::Name(
+            "Option".to_string(),
+            vec![TypeExpr::Name("String".to_string(), Vec::new(), span)],
+            span,
+        ),
+        korben_runtime::ffi::CType::Ptr => TypeExpr::Name(
+            "Option".to_string(),
+            vec![TypeExpr::Name("Ptr".to_string(), Vec::new(), span)],
+            span,
+        ),
+        other => TypeExpr::Name(other.korben_type().to_string(), Vec::new(), span),
     }
 }
 
