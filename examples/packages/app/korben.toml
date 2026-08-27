@@ -1,0 +1,10 @@
+[package]
+name = "app"
+version = "0.1.0"
+description = "A program with a dependency, built from a committed lockfile."
+license = "MIT"
+main = "main"
+
+[dependencies.greeting]
+path = "../greeting"
+version = "^1.2"

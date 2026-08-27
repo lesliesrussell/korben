@@ -1,0 +1,10 @@
+;;; The dependency `app` consumes.
+;;;
+;;; Nothing here is special: a package is a directory with a `korben.toml` and
+;;; a `src/`, and its `pub` declarations are what importers can see.
+(module greeting
+  (use std.string :as string))
+
+;;; Greet someone by name. An empty name greets the world.
+(pub fn hello [name: String] -> String
+  (if (empty? name) "Hello, world!" (format "Hello, {(string.trim name)}!")))

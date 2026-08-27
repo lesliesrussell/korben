@@ -247,44 +247,71 @@ mod templates {
   (assert-eq "a-b" (slugify "a  b")))
 "#;
 
-    /// A request handler: records, an error enum, `Result`, and map patterns.
+    // korben-qrt
+    /// An HTTP service over `std.http`: routing by pattern match, and a `serve`
+    /// argument that puts the same handler on a socket.
     pub const SERVICE_MAIN: &str = r#"(module main
+  (use std.http :as http)
   (use std.json :as json)
-  (use std.log :as log))
-
-(pub type Request
-  {method: Keyword path: String})
+  (use std.log :as log)
+  (use std.process :as process))
 
 (pub enum AppError
-  (BadRequest message: String)
-  (NotFound path: String))
+  (BadRequest message: String))
 
-;;; Route a request to a JSON response body.
-(pub fn handle [request: Request] -> Result String AppError
+;;; Build the greeting for a name.
+(pub fn greeting-for [name: String] -> Result String AppError
+  (if (empty? name) (Err (BadRequest "a name is required")) (Ok (format "Hello, {name}!"))))
+
+;;; Route a request to a response.
+;;;
+;;; The request is an ordinary record, so the method, path, and query string
+;;; are ordinary fields to match on.
+(pub fn handle [request: http.Request] -> http.Response
   (match request
-    {:method :get :path "/health"} (Ok "ok")
+    {:method :get :path "/health"} (http.text 200 "ok")
 
-    {:method :get :path "/version"} (Ok (json.encode {version "0.1.0"}))
+    {:method :get :path "/greeting" :query {"name" name}}
+      (match (greeting-for name)
+        (Ok message) (http.json 200 (json.encode {message message}))
+        (Err (BadRequest reason)) (http.json 400 (json.encode {error reason})))
 
-    {:path path} (Err (NotFound path))))
+    {:method :get :path "/greeting"} (http.json 200 (json.encode {message "Hello, world!"}))
+
+    _ (http.not-found)))
 
 (pub fn main [] -> Unit !io
-  (log.info "starting" {port 3000})
-  (match (handle (Request {method :get path "/health"}))
-    (Ok body) (println body)
-    (Err error) (println "error:" error)))
+  (match (process.args)
+    ; `serve` puts the handler on a socket. Requests are handled one at a time.
+    ["serve"]
+      (do
+        (log.info "listening" {port 3000})
+        (match (http.serve "127.0.0.1:3000" handle)
+          (Ok _) nil
+          (Err error) (println "server stopped:" (http.describe error))))
+    ; Without a socket, the handler is an ordinary function to call.
+    _ (println (handle (http.test-request :get "/greeting?name=Ada")).body)))
 "#;
 
     pub const SERVICE_TEST: &str = r#"(module main_test
-  (use main [handle Request]))
+  (use main [handle greeting-for BadRequest])
+  (use std.http :as http))
 
 (test "health endpoint is available"
-  (assert-eq (Ok "ok") (handle (Request {method :get path "/health"}))))
+  (let response (handle (http.test-request :get "/health")))
+  (assert-eq 200 response.status)
+  (assert-eq "ok" response.body))
+
+(test "the greeting reads the query string"
+  (let response (handle (http.test-request :get "/greeting?name=Ada")))
+  (assert-eq 200 response.status)
+  (assert (contains? response.body "Hello, Ada!") "expected the name in the body"))
+
+(test "an empty name is a bad request"
+  (assert-eq (Err (BadRequest "a name is required")) (greeting-for "")))
 
 (test "unknown paths are not found"
-  (match (handle (Request {method :get path "/nope"}))
-    (Err (NotFound path)) (assert-eq "/nope" path)
-    _ (assert false "expected a NotFound error")))
+  (assert-eq 404 (handle (http.test-request :get "/nope")).status))
 "#;
 }
 

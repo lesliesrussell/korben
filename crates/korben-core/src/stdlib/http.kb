@@ -4,8 +4,10 @@
 ;;; and routing is ordinary pattern matching — the language describes its own
 ;;; protocol handling rather than hiding it behind a native module.
 ;;;
-;;; Connections are handled one at a time on the accepting task. Concurrent
-;;; handling arrives with the async runtime; nothing here assumes otherwise.
+;;; Connections are handled one at a time on the accepting task. The sockets
+;;; block, and a started task cannot suspend, so a read stalls the scheduler
+;;; rather than yielding to it. Handling connections concurrently needs
+;;; non-blocking sockets; nothing here assumes it already has them.
 
 (module std.http
   (use std.net :as net)

@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `examples/packages/`, a two-package project with a committed `korben.lock`.
+  Acceptance criterion 10 was the only one with no runnable example: the lock
+  is verified reproducible by a test that regenerates it and compares bytes,
+  and the same test confirms an edited dependency stops the build.
+
+### Changed
+
+- The `service` template is written over `std.http` rather than hand-rolling a
+  request record. `korben new --template service` now scaffolds a real handler,
+  tests that exercise it without a socket, and a `serve` argument that puts it
+  on a port.
+- Documentation that the async runtime made stale: `std.net`, `std.http`, and
+  the README each said concurrent connection handling needed an async runtime.
+  It exists. The reason a server still handles one request at a time is that
+  the sockets block and a started task cannot suspend, so a read stalls the
+  scheduler. That needs non-blocking sockets, which is what the text says now.
+
 ## 0.7.0 — Structured concurrency
 
 An async runtime, within the constraint that Korben values are reference

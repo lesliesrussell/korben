@@ -128,7 +128,8 @@ next optimization, not a redesign.
 ## The language today
 
 `examples/tour.kb` exercises everything below; `examples/greeting.kb` is the
-specification's reference example adapted to what exists.
+specification's reference example adapted to what exists. `examples/packages/`
+is a project rather than a file: two packages and a committed lockfile.
 
 - S-expression reader with vectors, maps, sets, keywords, raw strings, nesting
   block comments, tagged literals (`#uuid`, `#date`, `#duration`), and the
@@ -338,7 +339,7 @@ is ready. All ten hold today:
 | 7 | Produce a native release binary | `korben build --release` |
 | 8 | Consume a C library through a generated binding and safe wrapper | `korben ffi c`, `examples/ffi.kb` |
 | 9 | Readable errors for type, macro, exhaustiveness, and ownership faults | `examples/ownership.kb` |
-| 10 | Reproduce the build from a lockfile without install scripts | `korben.lock`, `korben audit` |
+| 10 | Reproduce the build from a lockfile without install scripts | `examples/packages/`, `korben audit` |
 
 What that does *not* mean is that the specification is finished: parallelism, a
 package registry, TLS, and the language server are all still ahead.
@@ -353,7 +354,8 @@ crates/
   korben-core/     lowering, macro expansion, types, inference, evaluator,
                    core IR, the native backend, project loading, docs
   korben-cli/      the `korben` executable
-examples/          runnable programs, covered by the test suite
+examples/          runnable programs, covered by the test suite;
+                   `packages/` is a two-package project with a committed lock
 spec.md            the language and platform specification
 ```
 

@@ -1,0 +1,6 @@
+[package]
+name = "greeting"
+version = "1.2.0"
+description = "A greeting, as a dependency to depend on."
+license = "MIT"
+main = "greeting"

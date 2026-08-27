@@ -310,6 +310,60 @@ fn the_bundled_examples_run_check_and_format_cleanly() {
     assert!(ran >= 2, "expected the examples directory to have examples");
 }
 
+// korben-qrt
+/// Copy a directory tree, so a test may tamper with a checkout without dirtying it.
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).expect("create destination");
+    for entry in std::fs::read_dir(from).expect("read source") {
+        let entry = entry.expect("directory entry");
+        let target = to.join(entry.file_name());
+        if entry.file_type().expect("file type").is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).expect("copy file");
+        }
+    }
+}
+
+#[test]
+fn the_packages_example_reproduces_its_committed_lockfile() {
+    let example = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root")
+        .join("examples")
+        .join("packages");
+    let scratch = Scratch::new("packages-example");
+    let root = scratch.path().join("packages");
+    copy_tree(&example, &root);
+    let app = root.join("app");
+
+    // The committed lockfile is what the example ships, and it is enough to build.
+    let committed = std::fs::read_to_string(app.join("korben.lock")).expect("committed lock");
+    let run = korben(&app, &["run"]);
+    assert!(run.status.success(), "the example failed to run:\n{}", combined(&run));
+    assert!(stdout(&run).contains("Hello, Ada!"), "unexpected output:\n{}", stdout(&run));
+
+    // Resolving again from the same inputs writes the same bytes.
+    std::fs::remove_file(app.join("korben.lock")).expect("remove the lock");
+    let update = korben(&app, &["update"]);
+    assert!(update.status.success(), "update failed:\n{}", combined(&update));
+    let regenerated = std::fs::read_to_string(app.join("korben.lock")).expect("regenerated lock");
+    assert_eq!(committed, regenerated, "the committed lockfile is not reproducible");
+
+    // A dependency edited behind the lock stops the build rather than being used.
+    let source = root.join("greeting").join("src").join("greeting.kb");
+    let tampered = std::fs::read_to_string(&source).expect("read the dependency") + "\n;; edited\n";
+    std::fs::write(&source, tampered).expect("tamper with the dependency");
+    let after = korben(&app, &["run"]);
+    assert!(!after.status.success(), "a changed dependency was accepted:\n{}", combined(&after));
+    assert!(
+        combined(&after).contains("has changed since it was locked"),
+        "unexpected failure:\n{}",
+        combined(&after)
+    );
+}
+
 #[test]
 fn ffi_generates_bindings_from_a_header_and_lists_them() {
     let scratch = Scratch::new("ffi");

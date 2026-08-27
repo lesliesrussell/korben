@@ -1,0 +1,13 @@
+;;; A program with a dependency.
+;;;
+;;; `korben.lock` next to this manifest pins `greeting` by version and by a
+;;; SHA-256 of its contents. Every build verifies that checksum before reading
+;;; a single line of the dependency, and no package may run an install script.
+;;;
+;;; Run it with `korben run` from `examples/packages/app`.
+(module main
+  (use greeting :as greeting))
+
+(pub fn main [] -> Unit !io
+  (println (greeting.hello "Ada"))
+  (println (greeting.hello "")))
