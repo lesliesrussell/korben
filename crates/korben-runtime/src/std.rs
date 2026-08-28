@@ -949,14 +949,19 @@ pub fn builtin(name: &str) -> Option<Value> {
         "std.net/connect" => native("connect", 1, |_, args, loc| {
             crate::net::connect(&as_string("net.connect", &args[0], loc)?)
         }),
-        "Listener/accept" => native("accept", 1, |_, args, loc| crate::net::accept(&args[0], loc)),
+        // korben-48e
+        "Listener/accept" => {
+            native("accept", 1, |caller, args, loc| crate::net::accept(caller, &args[0], loc))
+        }
         "Listener/address" => {
             native("address", 1, |_, args, loc| crate::net::local_address(&args[0], loc))
         }
-        "Connection/read" => native("read", 1, |_, args, loc| crate::net::read(&args[0], loc)),
-        "Connection/write" => native("write", 2, |_, args, loc| {
+        "Connection/read" => {
+            native("read", 1, |caller, args, loc| crate::net::read(caller, &args[0], loc))
+        }
+        "Connection/write" => native("write", 2, |caller, args, loc| {
             let text = as_string("Connection.write", &args[1], loc)?;
-            crate::net::write(&args[0], &text, loc)
+            crate::net::write(caller, &args[0], &text, loc)
         }),
         "Connection/peer" => {
             native("peer", 1, |_, args, loc| crate::net::peer_address(&args[0], loc))

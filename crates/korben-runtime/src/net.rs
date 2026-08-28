@@ -6,18 +6,28 @@
 //! the receiver, so they borrow it rather than consuming it, which is what lets
 //! an accept loop keep using its listener.
 //!
-//! Reads and writes block. The async runtime schedules cooperatively and a
-//! started task cannot suspend, so a blocking read stalls the whole scheduler
-//! and a server handles one request at a time on the accepting task. Handling
-//! connections concurrently needs non-blocking sockets driven by the scheduler,
-//! which these operations do not yet use.
+//! An operation that would block does not stall the scheduler. Sockets are
+//! non-blocking, and `accept`, `read`, and `write` take the shape channels
+//! already have in `task.rs`: attempt the operation, and if it would block, run
+//! another ready task and try again.
+//!
+//! One thing differs from a channel. For a channel, nothing left to drive is a
+//! deadlock, because only another task can fill it. For a socket it is not --
+//! the operating system may deliver bytes later -- so with nothing else to run,
+//! the operation waits on the socket instead, in blocking mode. That is exactly
+//! right when there is no other work, and it needs no `poll` and no dependency.
+//!
+//! A started task still cannot suspend: a blocked one keeps its stack frame
+//! while it drives the next. Concurrency is therefore bounded by the recursion
+//! limit rather than by memory.
 
 // korben-7zt
+// korben-48e
 
 use crate::loc::Loc;
-use crate::value::{Flow, Foreign, Outcome, Value};
+use crate::value::{Caller, Flow, Foreign, Outcome, Value};
 use std::cell::RefCell;
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpListener, TcpStream};
 
 /// The largest chunk a single read returns.
@@ -63,6 +73,26 @@ fn closed(what: &str) -> Value {
     ))
 }
 
+// korben-48e
+/// What an operation should do next when it would block.
+enum Step {
+    /// Something else ran; try again without waiting.
+    Retry,
+    /// Nothing else can run, so wait on the socket itself.
+    Wait,
+}
+
+/// Let another ready task run, or report that none can.
+fn yield_or_wait(caller: &mut dyn Caller) -> Result<Step, Flow> {
+    match crate::task::drive_one(caller) {
+        Some(result) => {
+            result?;
+            Ok(Step::Retry)
+        }
+        None => Ok(Step::Wait),
+    }
+}
+
 pub fn listen(address: &str) -> Outcome {
     Ok(match TcpListener::bind(address) {
         Ok(listener) => Value::ok(listener_value(listener)),
@@ -77,16 +107,30 @@ pub fn connect(address: &str) -> Outcome {
     })
 }
 
-pub fn accept(value: &Value, loc: Loc) -> Outcome {
+// korben-48e
+pub fn accept(caller: &mut dyn Caller, value: &Value, loc: Loc) -> Outcome {
     let Some(handle) = as_listener(value) else {
         return Err(wrong("Listener.accept", "a Listener", value, loc));
     };
-    let borrowed = handle.borrow();
-    let Some(listener) = borrowed.as_ref() else { return Ok(closed("this listener")) };
-    Ok(match listener.accept() {
-        Ok((stream, _)) => Value::ok(connection_value(stream)),
-        Err(error) => Value::err(crate::std::io_error("", &error)),
-    })
+    let mut waiting = false;
+    loop {
+        // The handle is borrowed only for the attempt. Driving another task
+        // runs arbitrary Korben code, which may reach this same listener.
+        let attempt = {
+            let borrowed = handle.borrow();
+            let Some(listener) = borrowed.as_ref() else { return Ok(closed("this listener")) };
+            let _ = listener.set_nonblocking(!waiting);
+            listener.accept()
+        };
+        match attempt {
+            Ok((stream, _)) => return Ok(Value::ok(connection_value(stream))),
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == ErrorKind::WouldBlock && !waiting => {
+                waiting = matches!(yield_or_wait(caller)?, Step::Wait);
+            }
+            Err(error) => return Ok(Value::err(crate::std::io_error("", &error))),
+        }
+    }
 }
 
 pub fn local_address(value: &Value, loc: Loc) -> Outcome {
@@ -114,29 +158,73 @@ pub fn peer_address(value: &Value, loc: Loc) -> Outcome {
 }
 
 /// Read whatever has arrived. An empty string means the peer is done.
-pub fn read(value: &Value, loc: Loc) -> Outcome {
+// korben-48e
+pub fn read(caller: &mut dyn Caller, value: &Value, loc: Loc) -> Outcome {
     let Some(handle) = as_connection(value) else {
         return Err(wrong("Connection.read", "a Connection", value, loc));
     };
-    let mut borrowed = handle.borrow_mut();
-    let Some(stream) = borrowed.as_mut() else { return Ok(closed("this connection")) };
     let mut buffer = vec![0u8; READ_CHUNK];
-    Ok(match stream.read(&mut buffer) {
-        Ok(count) => {
-            buffer.truncate(count);
-            Value::ok(Value::str(String::from_utf8_lossy(&buffer).to_string()))
+    let mut waiting = false;
+    loop {
+        let attempt = {
+            let mut borrowed = handle.borrow_mut();
+            let Some(stream) = borrowed.as_mut() else { return Ok(closed("this connection")) };
+            let _ = stream.set_nonblocking(!waiting);
+            stream.read(&mut buffer)
+        };
+        match attempt {
+            Ok(count) => {
+                buffer.truncate(count);
+                return Ok(Value::ok(Value::str(String::from_utf8_lossy(&buffer).to_string())));
+            }
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == ErrorKind::WouldBlock && !waiting => {
+                waiting = matches!(yield_or_wait(caller)?, Step::Wait);
+            }
+            Err(error) => return Ok(Value::err(crate::std::io_error("", &error))),
         }
-        Err(error) => Value::err(crate::std::io_error("", &error)),
-    })
+    }
 }
 
-pub fn write(value: &Value, text: &str, loc: Loc) -> Outcome {
+// korben-48e
+pub fn write(caller: &mut dyn Caller, value: &Value, text: &str, loc: Loc) -> Outcome {
     let Some(handle) = as_connection(value) else {
         return Err(wrong("Connection.write", "a Connection", value, loc));
     };
+    // `write_all` cannot be used on a non-blocking socket: it reports that it
+    // would block without saying how much it had already sent, so the offset
+    // is tracked here instead.
+    let bytes = text.as_bytes();
+    let mut sent = 0usize;
+    let mut waiting = false;
+    while sent < bytes.len() {
+        let attempt = {
+            let mut borrowed = handle.borrow_mut();
+            let Some(stream) = borrowed.as_mut() else { return Ok(closed("this connection")) };
+            let _ = stream.set_nonblocking(!waiting);
+            stream.write(&bytes[sent..])
+        };
+        match attempt {
+            Ok(0) => {
+                return Ok(Value::err(crate::std::io_error(
+                    "",
+                    &std::io::Error::from(ErrorKind::WriteZero),
+                )))
+            }
+            Ok(count) => {
+                sent += count;
+                waiting = false;
+            }
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == ErrorKind::WouldBlock && !waiting => {
+                waiting = matches!(yield_or_wait(caller)?, Step::Wait);
+            }
+            Err(error) => return Ok(Value::err(crate::std::io_error("", &error))),
+        }
+    }
     let mut borrowed = handle.borrow_mut();
     let Some(stream) = borrowed.as_mut() else { return Ok(closed("this connection")) };
-    Ok(match stream.write_all(text.as_bytes()).and_then(|()| stream.flush()) {
+    Ok(match stream.flush() {
         Ok(()) => Value::ok(Value::Nil),
         Err(error) => Value::err(crate::std::io_error("", &error)),
     })
