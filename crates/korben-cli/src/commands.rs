@@ -102,7 +102,10 @@ fn print_help() {
     println!("  doc [--out <dir>]                         generate documentation");
     println!("  inspect                                   show the resolved project model");
     println!("  ffi [c <header>]                          list or generate foreign bindings");
-    println!("  build [--release] [--emit ir|rust]        compile to a native executable");
+    println!(
+        "  build [--release] [--target <triple>]     compile to a native executable\n\
+         \x20       [--emit ir|rust]"
+    );
     println!("  lsp                                       language server, on stdin and stdout\n");
     println!("{}", ui::bold("OTHER"));
     println!("  version                                   print the toolchain version");
@@ -822,6 +825,8 @@ fn cmd_build(args: &[String]) -> ExitCode {
     let flags = Flags::parse(args);
     let release = flags.has("release");
     let emit = flags.value("emit").unwrap_or("").to_string();
+    // korben-8cg
+    let target = flags.value("target").map(str::to_string);
     let mut session = match open_session(&flags) {
         Ok(session) => session,
         Err(code) => return code,
@@ -874,8 +879,23 @@ fn cmd_build(args: &[String]) -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    // korben-8cg
+    if let Some(triple) = &target {
+        if let Err(code) = verify_target(triple) {
+            return code;
+        }
+    }
+
     let profile = if release { "release" } else { "debug" };
-    let out = session.root.join("target").join(profile);
+    // korben-8cg
+    // Cross-built artifacts sit under their triple, the way cargo arranges
+    // them, so building for two targets does not overwrite one with the other.
+    let out = match &target {
+        Some(triple) => session.root.join("target").join(triple).join(profile),
+        None => session.root.join("target").join(profile),
+    };
+    // The generated Rust does not depend on the target, so every target shares
+    // one generated crate and cargo keeps their build directories apart.
     let crate_dir = session.root.join("target").join("codegen").join(profile);
     if let Err(error) = std::fs::create_dir_all(&out) {
         eprintln!("{} cannot create {}: {error}", ui::red("error:"), out.display());
@@ -899,6 +919,10 @@ fn cmd_build(args: &[String]) -> ExitCode {
     if release {
         command.arg("--release");
     }
+    // korben-8cg
+    if let Some(triple) = &target {
+        command.args(["--target", triple]);
+    }
     let status = match command.status() {
         Ok(status) => status,
         Err(error) => {
@@ -913,21 +937,112 @@ fn cmd_build(args: &[String]) -> ExitCode {
     if !status.success() {
         eprintln!("{} the generated crate did not compile", ui::red("build failed:"));
         eprintln!("  Inspect it at {}", crate_dir.display());
-        eprintln!("  and please report this as a compiler bug.");
+        // korben-8cg
+        // Generated Rust that compiles for the host and not for a cross target
+        // is the target's story -- a missing linker, or a platform the runtime
+        // does not reach -- so do not send the user to report a compiler bug.
+        match &target {
+            Some(triple) => {
+                eprintln!("  It compiles for the host, so `{triple}` is the difference:");
+                eprintln!("  check that its linker is installed and that the runtime supports it.");
+            }
+            None => eprintln!("  and please report this as a compiler bug."),
+        }
         return ExitCode::FAILURE;
     }
 
-    let built = crate_dir.join("target").join(profile).join(&session.manifest.name);
-    let destination = out.join(&session.manifest.name);
+    // korben-8cg
+    let artifact = artifact_name(&session.manifest.name, target.as_deref());
+    let mut built = crate_dir.join("target");
+    if let Some(triple) = &target {
+        built = built.join(triple);
+    }
+    let built = built.join(profile).join(&artifact);
+    let destination = out.join(&artifact);
     if let Err(error) = std::fs::copy(&built, &destination) {
         eprintln!("{} cannot copy the executable: {error}", ui::red("error:"));
         return ExitCode::FAILURE;
     }
 
     let size = std::fs::metadata(&destination).map(|meta| meta.len()).unwrap_or(0);
-    println!("{} {} ({profile}, {})", ui::green("built"), destination.display(), human_size(size));
+    // korben-8cg
+    let described = match &target {
+        Some(triple) => format!("{profile}, {triple}"),
+        None => profile.to_string(),
+    };
+    println!(
+        "{} {} ({described}, {})",
+        ui::green("built"),
+        destination.display(),
+        human_size(size)
+    );
     println!("  {}", ui::dim(&format!("generated crate: {}", crate_dir.display())));
     ExitCode::SUCCESS
+}
+
+// korben-8cg
+/// Reject a target triple before cargo does, because cargo reports a missing
+/// target as a missing `std` crate -- which says nothing about what to install.
+fn verify_target(triple: &str) -> Result<(), ExitCode> {
+    let Some(known) = tool_output("rustc", &["--print", "target-list"]) else {
+        // No rustc to ask. The cargo invocation is about to say so itself.
+        return Ok(());
+    };
+    if !known.lines().any(|line| line.trim() == triple) {
+        eprintln!("{} `{triple}` is not a target rustc knows", ui::red("build failed:"));
+        if let Some(near) = nearest_target(triple, &known) {
+            eprintln!("  Did you mean `{near}`?");
+        }
+        eprintln!("  `rustc --print target-list` lists every target.");
+        return Err(ExitCode::FAILURE);
+    }
+    // rustup owns installed standard libraries. Another Rust installation may
+    // have the target without it, so its absence is not evidence of anything.
+    let Some(installed) = tool_output("rustup", &["target", "list", "--installed"]) else {
+        return Ok(());
+    };
+    if !installed.lines().any(|line| line.trim() == triple) {
+        eprintln!(
+            "{} the standard library for `{triple}` is not installed",
+            ui::red("build failed:")
+        );
+        eprintln!("  Install it with `rustup target add {triple}`.");
+        return Err(ExitCode::FAILURE);
+    }
+    Ok(())
+}
+
+// korben-8cg
+/// Standard output of a toolchain query, or `None` when it cannot be asked.
+fn tool_output(program: &str, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new(program).args(args).output().ok()?;
+    output.status.success().then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+// korben-8cg
+/// The closest real triple to a misspelled one. Triples are long enough that a
+/// typo stays close, and different enough that a near miss is rarely wrong.
+fn nearest_target(triple: &str, known: &str) -> Option<String> {
+    let mut best: Option<(usize, &str)> = None;
+    for candidate in known.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let distance = korben_core::eval::edit_distance(triple, candidate);
+        if distance <= 3 && best.map(|(best, _)| distance < best).unwrap_or(true) {
+            best = Some((distance, candidate));
+        }
+    }
+    best.map(|(_, candidate)| candidate.to_string())
+}
+
+// korben-8cg
+/// What cargo names the executable it produces for `triple`.
+fn artifact_name(name: &str, triple: Option<&str>) -> String {
+    match triple {
+        Some(triple) if triple.contains("windows") => format!("{name}.exe"),
+        Some(triple) if triple.starts_with("wasm") => format!("{name}.wasm"),
+        Some(_) => name.to_string(),
+        None if cfg!(windows) => format!("{name}.exe"),
+        None => name.to_string(),
+    }
 }
 
 fn report_all(diagnostics: &[Diagnostic], session: &Session) -> ExitCode {

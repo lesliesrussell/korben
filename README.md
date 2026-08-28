@@ -40,7 +40,7 @@ One executable covers the standard workflow. Every command works on a project
 | `korben update` | Re-resolve and rewrite the lockfile |
 | `korben audit` | Verify the lockfile, checksums, and package metadata |
 | `korben doctor` | Toolchain and project health |
-| `korben build [--release] [--emit ir\|rust]` | Compile to a native executable |
+| `korben build [--release] [--target <triple>] [--emit ir\|rust]` | Compile to a native executable |
 | `korben lsp` | Language server, over stdin and stdout |
 
 In a workspace, `check`, `test`, `fmt`, and `lint` cover every member, while
@@ -123,6 +123,21 @@ Both stages are inspectable:
 korben build --emit ir      # the name-resolved core IR
 korben build --emit rust    # the generated Rust
 ```
+
+Because the backend hands its output to cargo, a build can name any target that
+toolchain has:
+
+```sh
+korben build --target wasm32-unknown-unknown
+korben build --release --target aarch64-unknown-linux-gnu
+```
+
+The artifact lands in `target/<triple>/<profile>/`, so building for several
+targets does not overwrite one with another, and it takes the extension the
+triple implies. The triple is checked before cargo is invoked: one rustc does
+not know is rejected with the nearest real one, and one whose standard library
+is missing names the `rustup target add` command that installs it, rather than
+surfacing as an error about a missing `std` crate.
 
 A release binary of the language tour is 587 KB and starts in about 7 ms.
 Values are still dynamically typed at run time, so compute-bound code is only

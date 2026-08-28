@@ -4,6 +4,14 @@
 
 ### Added
 
+- **Cross compilation.** `korben build --target <triple>` passes the triple
+  through to the cargo build the backend already drives, and the artifact lands
+  in `target/<triple>/<profile>/` with the extension the triple implies. The
+  triple is checked first: one rustc does not know is rejected with the nearest
+  real one, and one whose standard library is not installed names `rustup
+  target add`, where cargo would have reported a missing `std` crate. A cross
+  build that fails to compile no longer asks the user to report a compiler bug
+  -- the generated Rust compiles for the host, so the target is the difference.
 - **Workspaces.** A `[workspace] members = [...]` root gathers several packages
   in one repository. One resolution pass covers every member and one
   `korben.lock` at the root pins the result, so members that share a dependency
