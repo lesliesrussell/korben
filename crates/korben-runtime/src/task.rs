@@ -128,9 +128,11 @@ pub fn spawn(scope: &Value, thunk: Value, loc: Loc) -> Outcome {
     Ok(task_value(cell))
 }
 
-/// Run one ready task from the open scopes. Returns false when none is ready.
-/// Run one ready task, if there is one. This is what lets an operation that
-/// would block let something else make progress instead of stalling.
+/// Run one ready task from the open scopes, if any is ready.
+///
+/// This is what lets an operation that would block let something else make
+/// progress instead of stalling: a channel with nothing in it, and a socket
+/// with nothing on it, both come here before giving up.
 pub(crate) fn drive_one(caller: &mut dyn Caller) -> Option<Result<(), Flow>> {
     let ready = SCOPES.with(|scopes| {
         for scope in scopes.borrow().iter().rev() {
