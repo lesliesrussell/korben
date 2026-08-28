@@ -116,7 +116,11 @@
     400 "Bad Request"
     404 "Not Found"
     405 "Method Not Allowed"
+    413 "Request Too Large"
     500 "Internal Server Error"
+    ;; A status the table does not name still should not claim to be `OK`.
+    other :when (>= other 500) "Server Error"
+    other :when (>= other 400) "Client Error"
     _ "OK"))
 
 (fn header-lines [headers: Map String String] -> String
@@ -143,6 +147,16 @@
     (Err _) 0))
 
 ;; ------------------------------------------------------------------- server
+
+;;; The most a half-sent request may buffer before the server gives up on it.
+;;; A connection that keeps sending without ever completing a request is the
+;;; cheapest way to make a server hold memory on someone else's behalf.
+(def max-pending: Int 65536)
+
+;;; How long a connection may do nothing at all before it is closed. A client
+;;; that connects and never speaks costs a file descriptor and an entry in the
+;;; pool; this is what stops it costing them indefinitely.
+(def idle-millis: Int 30000)
 
 ;; A request has arrived in full once its head is terminated and its body is as
 ;; long as the headers promised.
@@ -184,7 +198,16 @@
               (do
                 (answer server handler id raw)
                 (dissoc pending id))
-              (assoc pending id raw))))))
+              ;; Still partial. Keep it only while it is worth keeping.
+              (if (> (string.byte-length raw) max-pending)
+                (do
+                  (match (server.write id (render-response
+                                            (text 413 "request too large")))
+                    (Ok _) nil
+                    (Err _) nil)
+                  (server.close-connection id)
+                  (dissoc pending id))
+                (assoc pending id raw)))))))
 
 ;;; Serve requests until the listener fails.
 ;;;
@@ -202,7 +225,15 @@
           (match (server.wait 1000)
             (Err error) (Err (Transport (str error)))
             (Ok ready)
-              (recur (reduce ready pending (fn [waiting id] (advance server handler waiting id)))))))))
+              (do
+                (let served (reduce ready pending (fn [waiting id] (advance server handler waiting id))))
+                ;; A connection that has gone quiet is closed here. One that
+                ;; never spoke at all is invisible above -- it is never ready,
+                ;; so nothing up there could decide to give up on it.
+                (match (server.evict idle-millis)
+                  (Err _) (recur served)
+                  (Ok dropped)
+                    (recur (reduce dropped served (fn [waiting id] (dissoc waiting id)))))))))))
 
 ;; ------------------------------------------------------------------- client
 

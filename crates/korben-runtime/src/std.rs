@@ -243,6 +243,7 @@ pub const NAMES: &[&str] = &[
     "Pool/read",
     "Pool/write",
     "Pool/close-connection",
+    "Pool/evict",
     "Pool/address",
     "Pool/close",
     "Pool/closed?",
@@ -980,6 +981,11 @@ pub fn builtin(name: &str) -> Option<Value> {
         "Pool/close-connection" => native("close-connection", 2, |_, args, loc| {
             let id = as_int("Pool.close-connection", &args[1], loc)?;
             crate::net::pool_drop(&args[0], id, loc)
+        }),
+        // korben-c6k
+        "Pool/evict" => native("evict", 2, |_, args, loc| {
+            let idle = as_int("Pool.evict", &args[1], loc)?;
+            crate::net::pool_evict(&args[0], idle, loc)
         }),
         "Pool/address" => {
             native("address", 1, |_, args, loc| crate::net::pool_address(&args[0], loc))
