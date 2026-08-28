@@ -982,6 +982,8 @@ fn native_result(name: &str) -> Option<&'static str> {
     match name {
         "open" | "create" => Some("File"),
         "listen" => Some("Listener"),
+        // korben-ae2
+        "pool" => Some("Pool"),
         "connect" | "accept" => Some("Connection"),
         _ => None,
     }

@@ -1855,6 +1855,8 @@ fn builtin_type_names() -> HashSet<String> {
         "String",
         "Listener",
         "Connection",
+        // korben-ae2
+        "Pool",
         // The async runtime.
         "Task",
         "Scope",

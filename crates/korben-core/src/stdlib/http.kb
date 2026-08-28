@@ -4,10 +4,11 @@
 ;;; and routing is ordinary pattern matching — the language describes its own
 ;;; protocol handling rather than hiding it behind a native module.
 ;;;
-;;; Connections are handled one at a time on the accepting task. The sockets
-;;; block, and a started task cannot suspend, so a read stalls the scheduler
-;;; rather than yielding to it. Handling connections concurrently needs
-;;; non-blocking sockets; nothing here assumes it already has them.
+;;; Connections are served concurrently, without any task suspending. The server
+;;; owns its listener and every open connection, waits for readiness across all
+;;; of them at once, and calls the handler only once a whole request has
+;;; arrived — so a handler always runs to completion, and a client that connects
+;;; and says nothing, or stops halfway through a request, holds up only itself.
 
 (module std.http
   (use std.net :as net)
@@ -141,68 +142,67 @@
     (Ok value) value
     (Err _) 0))
 
-(fn read-head [connection: Borrow Connection collected: String] -> String !io
-  (if (contains? collected "\r\n\r\n")
-    collected
-    (match (connection.read)
-      (Err _) collected
-      (Ok chunk) (if (empty? chunk) collected (recur connection (str collected chunk))))))
+;; ------------------------------------------------------------------- server
 
-(fn read-body [connection: Borrow Connection collected: String needed: Int] -> String !io
-  (if (>= (string.byte-length collected) needed)
-    collected
-    (match (connection.read)
-      (Err _) collected
-      (Ok chunk)
-        (if (empty? chunk)
-          collected
-          (recur connection (str collected chunk) needed)))))
-
-;;; Read one complete request from a connection.
-(fn read-request [connection: Borrow Connection] -> String !io
-  (let head (read-head connection ""))
-  (match (string.split-once head "\r\n\r\n")
-    (None) head
+;; A request has arrived in full once its head is terminated and its body is as
+;; long as the headers promised.
+(fn complete? [raw: String] -> Bool
+  (match (string.split-once raw "\r\n\r\n")
+    (None) false
     (Some parts)
       (do
         (let headers (parse-headers (rest (string.split (get parts 0 "") "\r\n"))))
-        (let body (read-body connection (get parts 1 "") (content-length headers)))
-        (str (get parts 0 "") "\r\n\r\n" body))))
+        (>= (string.byte-length (get parts 1 "")) (content-length headers)))))
 
-;; ------------------------------------------------------------------- server
-
-(fn respond [connection: Borrow Connection response: Response] -> Unit !io
-  (match (connection.write (render-response response))
+;; Answer one request and close the connection it came on.
+(fn answer [server: Borrow Pool handler: (-> [Request] Response) id: Int raw: String] -> Unit !io
+  (let response
+    (match (parse-request raw)
+      (Ok request) (handler request)
+      (Err error) (json 400 (str "{\"error\":\"" (describe error) "\"}"))))
+  (match (server.write id (render-response response))
     (Ok _) nil
-    (Err _) nil))
+    (Err _) nil)
+  (server.close-connection id))
 
-(fn handle [connection: Connection handler: (-> [Request] Response)] -> Unit !io
-  ;; `with` closes the connection on every exit path, including a failure
-  ;; inside the handler.
-  (with open connection
-    (let raw (read-request open))
-    (let response
-      (match (parse-request raw)
-        (Ok request) (handler request)
-        (Err error) (json 400 (str "{\"error\":\"" (describe error) "\"}"))))
-    (respond open response)))
-
-(fn accept-loop [listener: Listener handler: (-> [Request] Response)] -> Result Unit HttpError !io
-  (match (listener.accept)
-    (Err error) (Err (Transport (str error)))
-    (Ok connection)
-      (do
-        (handle connection handler)
-        (recur listener handler))))
+;; Take whatever has arrived on one connection, and answer it if that completed
+;; a request. Anything still partial is kept until that connection is ready
+;; again, so a client that stops halfway holds up only itself.
+(fn advance [server: Borrow Pool
+             handler: (-> [Request] Response)
+             pending: Map Int String
+             id: Int] -> Map Int String !io
+  (match (server.read id)
+    (Err _) (do (server.close-connection id) (dissoc pending id))
+    (Ok outcome)
+      (match outcome
+        (None) (do (server.close-connection id) (dissoc pending id))
+        (Some chunk)
+          (do
+            (let raw (str (get pending id "") chunk))
+            (if (complete? raw)
+              (do
+                (answer server handler id raw)
+                (dissoc pending id))
+              (assoc pending id raw))))))
 
 ;;; Serve requests until the listener fails.
 ;;;
-;;; `address` is a host and port, such as `"127.0.0.1:3000"`. Requests are
-;;; handled one at a time.
+;;; `address` is a host and port, such as `"127.0.0.1:3000"`. The server owns
+;;; its listener and every open connection, waits for readiness across all of
+;;; them at once, and calls the handler only once a whole request has arrived —
+;;; so a handler always runs to completion, and a client that connects and says
+;;; nothing holds up nobody.
 (pub fn serve [address: String handler: (-> [Request] Response)] -> Result Unit HttpError !io
-  (match (net.listen address)
+  (match (net.pool address)
     (Err error) (Err (Transport (str error)))
-    (Ok listener) (accept-loop listener handler)))
+    (Ok opened)
+      (with server opened
+        (loop [pending {}]
+          (match (server.wait 1000)
+            (Err error) (Err (Transport (str error)))
+            (Ok ready)
+              (recur (reduce ready pending (fn [waiting id] (advance server handler waiting id)))))))))
 
 ;; ------------------------------------------------------------------- client
 

@@ -260,3 +260,253 @@ fn wrong(name: &str, expected: &str, got: &Value, loc: Loc) -> Flow {
             .label(format!("found {}", got.type_name())),
     )
 }
+
+// ------------------------------------------------------------- readiness
+
+// korben-ae2
+// A server has to ask which of several sockets is ready at once. That is the
+// one thing the standard library cannot express, so `poll(2)` is declared here
+// the way `ffi.rs` declares `dlopen` and `dlsym`.
+//
+// Waiting on a single socket is not a substitute. It is what the driving
+// approach did, and it is why that approach failed: waiting on one connection
+// stops the server accepting another.
+
+#[cfg(unix)]
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PollFd {
+    fd: std::os::raw::c_int,
+    events: std::os::raw::c_short,
+    revents: std::os::raw::c_short,
+}
+
+/// `nfds_t` is not the same width everywhere, and it is an argument, so it has
+/// to match.
+#[cfg(all(unix, target_os = "macos"))]
+type NfdsT = std::os::raw::c_uint;
+#[cfg(all(unix, not(target_os = "macos")))]
+type NfdsT = std::os::raw::c_ulong;
+
+/// There is data to read, or the peer has closed.
+#[cfg(unix)]
+const POLLIN: std::os::raw::c_short = 0x0001;
+
+#[cfg(unix)]
+extern "C" {
+    fn poll(fds: *mut PollFd, nfds: NfdsT, timeout: std::os::raw::c_int) -> std::os::raw::c_int;
+}
+
+/// Which of `fds` can be read without blocking, waiting up to `timeout_ms`.
+///
+/// A negative timeout waits indefinitely, which is what an idle server wants.
+#[cfg(unix)]
+fn readable(fds: &[std::os::raw::c_int], timeout_ms: i32) -> std::io::Result<Vec<bool>> {
+    if fds.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut polled: Vec<PollFd> =
+        fds.iter().map(|fd| PollFd { fd: *fd, events: POLLIN, revents: 0 }).collect();
+    loop {
+        // SAFETY: `polled` is a valid, correctly sized array of `pollfd` for
+        // the length passed alongside it, and it outlives the call.
+        let count = unsafe { poll(polled.as_mut_ptr(), polled.len() as NfdsT, timeout_ms) };
+        if count < 0 {
+            let error = std::io::Error::last_os_error();
+            // A signal is not a failure; ask again.
+            if error.kind() == ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        return Ok(polled.iter().map(|entry| entry.revents & POLLIN != 0).collect());
+    }
+}
+
+#[cfg(not(unix))]
+fn readable(_fds: &[std::os::raw::c_int], _timeout_ms: i32) -> std::io::Result<Vec<bool>> {
+    Err(std::io::Error::new(
+        ErrorKind::Unsupported,
+        "waiting on several sockets at once is only supported on Unix",
+    ))
+}
+
+// ------------------------------------------------------------------ pools
+
+// korben-ae2
+/// A server's sockets: its listener, and every connection it has accepted.
+///
+/// One resource owning many sockets, rather than a Korben collection of them,
+/// because a resource-bearing value moves -- a connection cannot be taken out
+/// of a vector and put back on every pass of a loop. Connections are addressed
+/// by id instead, and the protocol state that belongs with them stays in
+/// Korben, where the rest of `std.http` is.
+pub struct Pool {
+    listener: TcpListener,
+    connections: Vec<(i64, TcpStream)>,
+    next: i64,
+}
+
+type PoolHandle = RefCell<Option<Pool>>;
+
+fn as_pool(value: &Value) -> Option<&PoolHandle> {
+    let Value::Foreign(foreign) = value else { return None };
+    if foreign.kind != "Pool" {
+        return None;
+    }
+    foreign.downcast::<PoolHandle>()
+}
+
+/// Bind an address and start a pool on it.
+pub fn pool(address: &str) -> Outcome {
+    let listener = match TcpListener::bind(address) {
+        Ok(listener) => listener,
+        Err(error) => return Ok(Value::err(crate::std::io_error(address, &error))),
+    };
+    if let Err(error) = listener.set_nonblocking(true) {
+        return Ok(Value::err(crate::std::io_error(address, &error)));
+    }
+    Ok(Value::ok(Foreign::wrap(
+        "Pool",
+        RefCell::new(Some(Pool { listener, connections: Vec::new(), next: 1 })),
+    )))
+}
+
+/// The ids of every connection with something to read, waiting up to
+/// `timeout_ms` for one to appear.
+///
+/// Connections waiting to be accepted are accepted here and registered, but not
+/// reported: a connection that has said nothing is not readable, which is
+/// exactly why a silent client cannot hold up the server.
+pub fn pool_wait(value: &Value, timeout_ms: i64, loc: Loc) -> Outcome {
+    let Some(handle) = as_pool(value) else {
+        return Err(wrong("Pool.wait", "a Pool", value, loc));
+    };
+    let mut borrowed = handle.borrow_mut();
+    let Some(pool) = borrowed.as_mut() else { return Ok(closed("this pool")) };
+
+    #[cfg(unix)]
+    let mut descriptors = {
+        use std::os::unix::io::AsRawFd;
+        let mut descriptors = vec![pool.listener.as_raw_fd()];
+        descriptors.extend(pool.connections.iter().map(|(_, stream)| stream.as_raw_fd()));
+        descriptors
+    };
+    #[cfg(not(unix))]
+    let mut descriptors: Vec<std::os::raw::c_int> = Vec::new();
+    let ready = match readable(&descriptors, timeout_ms as i32) {
+        Ok(ready) => ready,
+        Err(error) => return Ok(Value::err(crate::std::io_error("", &error))),
+    };
+    descriptors.clear();
+
+    if ready.first().copied().unwrap_or(false) {
+        // Take everything the backlog holds, not just one: the listener will
+        // not report itself readable again for connections already waiting.
+        loop {
+            match pool.listener.accept() {
+                Ok((stream, _)) => {
+                    let _ = stream.set_nonblocking(true);
+                    let id = pool.next;
+                    pool.next += 1;
+                    pool.connections.push((id, stream));
+                }
+                Err(error) if error.kind() == ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+    }
+
+    // `ready` describes the connections as they were before accepting, so
+    // zipping stops at the ones it knows about.
+    let ids: Vec<Value> = pool
+        .connections
+        .iter()
+        .zip(ready.iter().skip(1))
+        .filter(|(_, readable)| **readable)
+        .map(|((id, _), _)| Value::Int(*id))
+        .collect();
+    Ok(Value::ok(Value::vector(ids)))
+}
+
+/// Read whatever has arrived on one connection.
+///
+/// `None` means the peer is finished; an empty string means nothing new.
+pub fn pool_read(value: &Value, id: i64, loc: Loc) -> Outcome {
+    let Some(handle) = as_pool(value) else {
+        return Err(wrong("Pool.read", "a Pool", value, loc));
+    };
+    let mut borrowed = handle.borrow_mut();
+    let Some(pool) = borrowed.as_mut() else { return Ok(closed("this pool")) };
+    let Some((_, stream)) = pool.connections.iter_mut().find(|(each, _)| *each == id) else {
+        return Ok(closed("this connection"));
+    };
+    let mut buffer = vec![0u8; READ_CHUNK];
+    match stream.read(&mut buffer) {
+        Ok(0) => Ok(Value::ok(Value::none())),
+        Ok(count) => {
+            buffer.truncate(count);
+            Ok(Value::ok(Value::some(Value::str(String::from_utf8_lossy(&buffer).to_string()))))
+        }
+        Err(error) if error.kind() == ErrorKind::WouldBlock => {
+            Ok(Value::ok(Value::some(Value::str(""))))
+        }
+        Err(error) => Ok(Value::err(crate::std::io_error("", &error))),
+    }
+}
+
+/// Write a whole response to one connection.
+///
+/// This one call may block, and deliberately: a response is small, and a peer
+/// that will not read it is a different problem from one that will not write.
+pub fn pool_write(value: &Value, id: i64, text: &str, loc: Loc) -> Outcome {
+    let Some(handle) = as_pool(value) else {
+        return Err(wrong("Pool.write", "a Pool", value, loc));
+    };
+    let mut borrowed = handle.borrow_mut();
+    let Some(pool) = borrowed.as_mut() else { return Ok(closed("this pool")) };
+    let Some((_, stream)) = pool.connections.iter_mut().find(|(each, _)| *each == id) else {
+        return Ok(closed("this connection"));
+    };
+    let _ = stream.set_nonblocking(false);
+    let outcome = match stream.write_all(text.as_bytes()).and_then(|()| stream.flush()) {
+        Ok(()) => Value::ok(Value::Nil),
+        Err(error) => Value::err(crate::std::io_error("", &error)),
+    };
+    let _ = stream.set_nonblocking(true);
+    Ok(outcome)
+}
+
+/// Close one connection and forget it.
+pub fn pool_drop(value: &Value, id: i64, loc: Loc) -> Outcome {
+    let Some(handle) = as_pool(value) else {
+        return Err(wrong("Pool.close-connection", "a Pool", value, loc));
+    };
+    let mut borrowed = handle.borrow_mut();
+    let Some(pool) = borrowed.as_mut() else { return Ok(closed("this pool")) };
+    pool.connections.retain(|(each, _)| *each != id);
+    Ok(Value::ok(Value::Nil))
+}
+
+/// Release the listener and every connection still open.
+pub fn pool_close(value: &Value, loc: Loc) -> Outcome {
+    let Some(handle) = as_pool(value) else {
+        return Err(wrong("Pool.close", "a Pool", value, loc));
+    };
+    handle.borrow_mut().take();
+    Ok(Value::Nil)
+}
+
+/// The address the pool is listening on, which is how a test finds the port
+/// when it asked for zero.
+pub fn pool_address(value: &Value, loc: Loc) -> Outcome {
+    let Some(handle) = as_pool(value) else {
+        return Err(wrong("Pool.address", "a Pool", value, loc));
+    };
+    let borrowed = handle.borrow();
+    let Some(pool) = borrowed.as_ref() else { return Ok(closed("this pool")) };
+    Ok(match pool.listener.local_addr() {
+        Ok(address) => Value::ok(Value::str(address.to_string())),
+        Err(error) => Value::err(crate::std::io_error("", &error)),
+    })
+}
