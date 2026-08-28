@@ -959,3 +959,125 @@ fn the_http_client_talks_to_the_http_server() {
     assert!(client.status.success(), "{}", combined(&client));
     assert_eq!(stdout(&client), "200 you asked for /hello\n");
 }
+
+// korben-rm1
+const ADAPTER: &str = r#"use korben_export::korben_export;
+
+#[korben_export]
+pub fn slugify(input: &str) -> String {
+    input.trim().to_lowercase().replace(' ', "-")
+}
+
+#[korben_export]
+pub fn add(left: i64, right: i64) -> i64 {
+    left + right
+}
+
+#[korben_export]
+pub fn scale(value: f64, factor: f64) -> f64 {
+    value * factor
+}
+
+#[korben_export]
+pub fn toggle(flag: bool) -> bool {
+    !flag
+}
+
+#[korben_export]
+pub fn parse_port(text: String) -> Result<i64, String> {
+    text.parse::<i64>().map_err(|error| format!("{text}: {error}"))
+}
+
+#[korben_export]
+pub fn log_line(text: &str) {
+    println!("{text}");
+}
+
+/// Not annotated, so not the generator's business.
+pub fn helper(value: i64) -> i64 {
+    value
+}
+"#;
+
+// korben-rm1
+#[test]
+fn a_generated_adapter_module_checks_and_is_already_formatted() {
+    let scratch = Scratch::new("ffirust");
+    let source = scratch.path().join("lib.rs");
+    std::fs::write(&source, ADAPTER).unwrap();
+    let out = scratch.path().join("slug.kb");
+
+    let generated = korben(
+        scratch.path(),
+        &[
+            "ffi",
+            "rust",
+            source.to_str().unwrap(),
+            "--library",
+            "slug",
+            "--module",
+            "slug",
+            "--out",
+            out.to_str().unwrap(),
+        ],
+    );
+    assert!(generated.status.success(), "{}", combined(&generated));
+    assert!(stdout(&generated).contains("6 bindings"), "{}", stdout(&generated));
+
+    let text = std::fs::read_to_string(&out).unwrap();
+    // Both layers are there: the foreign contract and the wrapper over it.
+    assert!(
+        text.contains("(ffi/c-fn raw-slugify \"korben_export_slugify\" [input: CStr] -> CStr)"),
+        "{text}"
+    );
+    assert!(text.contains("(pub fn slugify [input: String] -> Result String String"), "{text}");
+    // The error channel is declared once, however many functions there are.
+    assert_eq!(text.matches("\"korben_export_last_error\"").count(), 1);
+    // A name that is not annotated is not the generator's business.
+    assert!(!text.contains("helper"), "{text}");
+
+    // The generated module is real Korben: it type-checks, and it is already
+    // in the canonical form `korben fmt --check` demands of a project.
+    let checked = korben(scratch.path(), &["check", out.to_str().unwrap()]);
+    assert!(checked.status.success(), "{}", combined(&checked));
+    let formatted = korben(scratch.path(), &["fmt", "--check", out.to_str().unwrap()]);
+    assert!(formatted.status.success(), "{}", combined(&formatted));
+}
+
+// korben-rm1
+#[test]
+fn a_signature_that_cannot_cross_is_listed_rather_than_guessed_at() {
+    let scratch = Scratch::new("ffirustskip");
+    let source = scratch.path().join("lib.rs");
+    std::fs::write(
+        &source,
+        "use korben_export::korben_export;\n\n\
+         #[korben_export]\npub fn tally(rows: Vec<i64>) -> i64 { rows.len() as i64 }\n\n\
+         #[korben_export]\npub fn scale(text: &str, factor: f64) -> f64 { factor }\n",
+    )
+    .unwrap();
+
+    let generated = korben(scratch.path(), &["ffi", "rust", source.to_str().unwrap()]);
+    assert!(generated.status.success(), "{}", combined(&generated));
+    let text = combined(&generated);
+    assert!(text.contains("Not exported:"), "{text}");
+    assert!(text.contains("Vec<i64>"), "{text}");
+    assert!(text.contains("mixes floating-point and other parameters"), "{text}");
+    assert!(text.contains("skipped 2 functions"), "{text}");
+}
+
+// korben-rm1
+#[test]
+fn a_file_with_nothing_annotated_says_so() {
+    let scratch = Scratch::new("ffirustempty");
+    let source = scratch.path().join("lib.rs");
+    std::fs::write(&source, "pub fn ordinary(value: i64) -> i64 { value }\n").unwrap();
+
+    let generated = korben(scratch.path(), &["ffi", "rust", source.to_str().unwrap()]);
+    assert!(generated.status.success(), "{}", combined(&generated));
+    assert!(
+        combined(&generated).contains("no `#[korben_export]` functions"),
+        "{}",
+        combined(&generated)
+    );
+}

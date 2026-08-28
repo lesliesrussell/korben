@@ -14,3 +14,4 @@ korben-syntax.workspace = true
 korben-core.workspace = true
 korben-lsp.workspace = true
 korben-runtime.workspace = true
+korben-adapter.workspace = true

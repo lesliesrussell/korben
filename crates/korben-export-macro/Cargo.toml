@@ -8,3 +8,6 @@ description = "The #[korben_export] attribute for the Korben adapter ABI."
 
 [lib]
 proc-macro = true
+
+[dependencies]
+korben-adapter.workspace = true

@@ -101,7 +101,7 @@ fn print_help() {
     println!("  expand <file>                             show macro expansion");
     println!("  doc [--out <dir>]                         generate documentation");
     println!("  inspect                                   show the resolved project model");
-    println!("  ffi [c <header>]                          list or generate foreign bindings");
+    println!("  ffi [c <header>] [rust <file.rs>]         list or generate foreign bindings");
     println!(
         "  build [--release] [--target <triple>]     compile to a native executable\n\
          \x20       [--emit ir|rust]"
@@ -1359,9 +1359,14 @@ fn cmd_ffi(args: &[String]) -> ExitCode {
     let flags = Flags::parse(args);
     match flags.positional.first().map(String::as_str) {
         Some("c") => cmd_ffi_c(&flags),
+        // korben-rm1
+        Some("rust") => cmd_ffi_rust(&flags),
         Some(other) => {
             eprintln!("{} unknown `korben ffi` subcommand `{other}`", ui::red("error:"));
-            eprintln!("  Use `korben ffi` to list bindings, or `korben ffi c <header>`.");
+            eprintln!(
+                "  Use `korben ffi` to list bindings, `korben ffi c <header>`, or \
+                 `korben ffi rust <file.rs>`."
+            );
             ExitCode::from(2)
         }
         None => cmd_ffi_list(&flags),
@@ -1388,7 +1393,8 @@ fn cmd_ffi_list(flags: &Flags) -> ExitCode {
             ui::yellow("declared Rust adapters:"),
             session.manifest.ffi_rust.join(", ")
         );
-        println!("  {}", ui::dim("the Rust adapter ABI is not implemented yet"));
+        // korben-rm1
+        println!("  {}", ui::dim("generate bindings with `korben ffi rust <file.rs>`"));
     }
 
     let mut total = 0usize;
@@ -1465,6 +1471,76 @@ fn cmd_ffi_c(flags: &Flags) -> ExitCode {
     if !extracted.skipped.is_empty() {
         eprintln!(
             "{} {} declaration{} could not be typed and were skipped",
+            ui::yellow("note:"),
+            extracted.skipped.len(),
+            ui::plural(extracted.skipped.len())
+        );
+    }
+    ExitCode::SUCCESS
+}
+
+// korben-rm1
+/// Generate a binding module from a Rust adapter's source.
+fn cmd_ffi_rust(flags: &Flags) -> ExitCode {
+    let Some(source_path) = flags.positional.get(1) else {
+        eprintln!("{} `korben ffi rust` needs a Rust source file", ui::red("error:"));
+        eprintln!("  korben ffi rust <lib.rs> --library <name> [--module <name>] [--out <file>]");
+        return ExitCode::from(2);
+    };
+    let path = PathBuf::from(source_path);
+    let Ok(source) = std::fs::read_to_string(&path) else {
+        eprintln!("{} cannot read {}", ui::red("error:"), path.display());
+        return ExitCode::FAILURE;
+    };
+    let stem = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+        .unwrap_or_else(|| "adapter".to_string());
+    // A crate's entry point is `lib.rs`, whose name says nothing about the
+    // library it builds, so ask rather than generate a module called `lib`.
+    let default = if stem == "lib" || stem == "mod" { "adapter" } else { &stem };
+    let library = flags.value("library").unwrap_or(default).to_string();
+    let module = flags.value("module").unwrap_or(default).to_string();
+
+    let extracted = korben_adapter::extract(&source);
+    if extracted.exported.is_empty() && extracted.skipped.is_empty() {
+        eprintln!("{} {} has no `#[korben_export]` functions", ui::yellow("note:"), path.display());
+        return ExitCode::SUCCESS;
+    }
+    let rendered =
+        korben_adapter::korben::render(&module, &library, &path.display().to_string(), &extracted);
+    // Generated source lands in someone's project, where `korben fmt --check`
+    // runs over it, so it leaves here in canonical form. Formatting it rather
+    // than hand-tuning the rendering keeps it canonical if the formatter
+    // changes; a file the reader cannot parse comes back unchanged, and the
+    // check below is what would catch that.
+    let mut sources = korben_syntax::SourceMap::new();
+    let file = sources.add_file(&path, rendered.clone());
+    let (rendered, errors) = korben_syntax::fmt::format_source(file, &rendered);
+    if errors.iter().any(korben_syntax::Diagnostic::is_error) {
+        eprintln!("{} the generated module does not parse", ui::red("error:"));
+        eprintln!("  Please report this as a compiler bug.");
+        return ExitCode::FAILURE;
+    }
+
+    match flags.value("out") {
+        Some(out) => {
+            if let Err(error) = std::fs::write(out, &rendered) {
+                eprintln!("{} cannot write {out}: {error}", ui::red("error:"));
+                return ExitCode::FAILURE;
+            }
+            println!(
+                "{} {} binding{} to {out}",
+                ui::green("generated"),
+                extracted.exported.len(),
+                ui::plural(extracted.exported.len())
+            );
+        }
+        None => print!("{rendered}"),
+    }
+    if !extracted.skipped.is_empty() {
+        eprintln!(
+            "{} skipped {} function{} that could not cross the adapter boundary",
             ui::yellow("note:"),
             extracted.skipped.len(),
             ui::plural(extracted.skipped.len())

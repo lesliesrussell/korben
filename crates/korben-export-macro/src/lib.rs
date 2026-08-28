@@ -9,12 +9,13 @@
 //! It needs `proc_macro`, which the compiler ships, and nothing else. `syn` and
 //! `quote` are the usual way to write this, and they are ordinary crates, which
 //! the toolchain does not take -- the reader, the TOML parser, and the JSON-RPC
-//! codec are all in-tree for the same reason. The parsing lives in [`shim`],
-//! over the item's source text, where it can be tested.
+//! codec are all in-tree for the same reason.
+//!
+//! Reading the signature lives in `korben-adapter`, where `korben ffi rust`
+//! reads it too. One reader means the two halves of the boundary cannot
+//! disagree about a type, a symbol name, or a rejection.
 
 // korben-10s
-
-mod shim;
 
 use proc_macro::TokenStream;
 
@@ -36,18 +37,20 @@ pub fn korben_export(attribute: TokenStream, item: TokenStream) -> TokenStream {
     if !attribute.is_empty() {
         return error("`#[korben_export]` takes no arguments");
     }
-    match shim::generate(&item.to_string()) {
-        Ok(expanded) => expanded.parse().unwrap_or_else(|_| {
-            error(
-                "`#[korben_export]` generated a shim that does not parse; \
-                   please report this as a compiler bug",
-            )
-        }),
-        Err(message) => error(&message),
-    }
+    let source = item.to_string();
+    let signature = match korben_adapter::parse(&source) {
+        Ok(signature) => signature,
+        Err(message) => return error(&message),
+    };
+    korben_adapter::rust::render(&source, &signature).parse().unwrap_or_else(|_| {
+        error(
+            "`#[korben_export]` generated a shim that does not parse; \
+             please report this as a compiler bug",
+        )
+    })
 }
 
 /// Report a rejection where the compiler will show it.
 fn error(message: &str) -> TokenStream {
-    format!("::std::compile_error!({:?});", message).parse().expect("a literal compile_error")
+    format!("::std::compile_error!({message:?});").parse().expect("a literal compile_error")
 }

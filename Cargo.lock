@@ -3,9 +3,14 @@
 version = 4
 
 [[package]]
+name = "korben-adapter"
+version = "0.7.0"
+
+[[package]]
 name = "korben-cli"
 version = "0.7.0"
 dependencies = [
+ "korben-adapter",
  "korben-core",
  "korben-lsp",
  "korben-runtime",
@@ -30,6 +35,9 @@ dependencies = [
 [[package]]
 name = "korben-export-macro"
 version = "0.7.0"
+dependencies = [
+ "korben-adapter",
+]
 
 [[package]]
 name = "korben-lsp"
