@@ -132,8 +132,91 @@ pub fn extract(source: &str) -> Extracted {
     Extracted { exported, skipped }
 }
 
+/// Replace every comment with blanks, so a mention of the attribute in prose is
+/// not read as a use of it, and so a `//` inside a string literal survives.
+///
+/// Comments are blanked rather than removed to keep every other byte where it
+/// was, which is what lets the scan below slice the original text.
+fn strip_comments(source: &str) -> String {
+    #[derive(Clone, Copy)]
+    enum State {
+        Code,
+        Line,
+        Block,
+        Text(char),
+    }
+    let bytes: Vec<char> = source.chars().collect();
+    let mut out = String::with_capacity(source.len());
+    let mut state = State::Code;
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let current = bytes[index];
+        let next = bytes.get(index + 1).copied();
+        match state {
+            State::Code => match (current, next) {
+                ('/', Some('/')) => {
+                    state = State::Line;
+                    out.push_str("  ");
+                    index += 2;
+                }
+                ('/', Some('*')) => {
+                    state = State::Block;
+                    out.push_str("  ");
+                    index += 2;
+                }
+                ('"', _) | ('\'', _) => {
+                    state = State::Text(current);
+                    out.push(current);
+                    index += 1;
+                }
+                _ => {
+                    out.push(current);
+                    index += 1;
+                }
+            },
+            State::Line => {
+                if current == '\n' {
+                    state = State::Code;
+                    out.push('\n');
+                } else {
+                    out.push(' ');
+                }
+                index += 1;
+            }
+            State::Block => {
+                if current == '*' && next == Some('/') {
+                    state = State::Code;
+                    out.push_str("  ");
+                    index += 2;
+                } else {
+                    out.push(if current == '\n' { '\n' } else { ' ' });
+                    index += 1;
+                }
+            }
+            State::Text(quote) => {
+                out.push(current);
+                if current == '\\' {
+                    // An escape carries the next character with it, so a
+                    // closing quote is not read out of `\"`.
+                    if let Some(escaped) = next {
+                        out.push(escaped);
+                        index += 2;
+                        continue;
+                    }
+                }
+                if current == quote {
+                    state = State::Code;
+                }
+                index += 1;
+            }
+        }
+    }
+    out
+}
+
 /// The signature of every annotated item, from the attribute to the body.
 fn annotated_headers(source: &str) -> Vec<String> {
+    let source = &strip_comments(source);
     let mut headers = Vec::new();
     for (offset, _) in source.match_indices("korben_export") {
         // Walk back over `#[` and any whitespace between its parts, so both
@@ -428,6 +511,27 @@ mod tests {
         let signature =
             parse("# [doc = \" Wraps an unsafe call.\"] pub fn wrap (n : i64) -> i64 { }").unwrap();
         assert_eq!(signature.name, "wrap");
+    }
+
+    #[test]
+    fn the_attribute_named_in_prose_is_not_a_use_of_it() {
+        // A crate's own documentation talks about the attribute constantly.
+        let source = r#"
+//! `#[korben_export]` adds a shim beside each function.
+
+use korben_export::korben_export;
+
+/// See `#[korben_export]` for what crosses.
+#[korben_export]
+pub fn slugify(input: &str) -> String {
+    let separator = "//";
+    input.replace(separator, "-")
+}
+"#;
+        let extracted = extract(source);
+        assert_eq!(extracted.exported.len(), 1, "{:?}", extracted.exported);
+        assert_eq!(extracted.exported[0].name, "slugify");
+        assert!(extracted.skipped.is_empty());
     }
 
     #[test]

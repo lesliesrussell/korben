@@ -521,3 +521,91 @@ fn a_cross_build_lands_under_its_triple() {
     // The default build keeps its own place, so the two do not collide.
     assert!(!project.join("target/debug/app").exists());
 }
+
+// korben-vdw
+/// The environment variable a dynamic loader takes its search path from.
+fn library_path_variable() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "DYLD_LIBRARY_PATH"
+    } else {
+        "LD_LIBRARY_PATH"
+    }
+}
+
+// korben-vdw
+#[test]
+fn a_rust_adapter_agrees_between_execution_modes() {
+    if !cargo_available() {
+        eprintln!("skipping: no cargo on PATH");
+        return;
+    }
+    if !cfg!(unix) {
+        eprintln!("skipping: foreign calls are Unix-only");
+        return;
+    }
+
+    let example = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root")
+        .join("examples/adapter");
+    let scratch = Scratch::new("adapter");
+    let rust_target = scratch.path().join("rust");
+
+    // Build the Rust half where the manifest lives, so its path dependency on
+    // korben-export still resolves, but with its output in the scratch.
+    let built = Command::new("cargo")
+        .args(["build", "--manifest-path"])
+        .arg(example.join("Cargo.toml"))
+        .arg("--target-dir")
+        .arg(&rust_target)
+        .output()
+        .expect("build the adapter");
+    assert!(built.status.success(), "adapter build failed:\n{}", combined(&built));
+    let libraries = rust_target.join("debug");
+
+    // Copy the Korben half out of the checkout, so neither execution mode
+    // writes its build directory into the repository.
+    let project = scratch.path().join("project");
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::copy(example.join("korben.toml"), project.join("korben.toml")).unwrap();
+    for module in ["main.kb", "slug.kb"] {
+        std::fs::copy(example.join("src").join(module), project.join("src").join(module)).unwrap();
+    }
+
+    let run = |args: &[&str]| {
+        Command::new(EXE)
+            .args(args)
+            .current_dir(&project)
+            .env("NO_COLOR", "1")
+            .env(library_path_variable(), &libraries)
+            .output()
+            .expect("run korben")
+    };
+
+    let interpreted = run(&["run"]);
+    assert!(interpreted.status.success(), "interpreted run failed:\n{}", combined(&interpreted));
+    // The adapter really ran: this is a string Rust built and handed back.
+    assert!(stdout(&interpreted).contains("slugify: korben-is-fast"), "{}", stdout(&interpreted));
+    // An error raised in Rust arrives as an `Err` carrying its message.
+    assert!(
+        stdout(&interpreted).contains("truncate failed: a limit of 0 leaves nothing to show"),
+        "{}",
+        stdout(&interpreted)
+    );
+
+    let compiled = run(&["build"]);
+    assert!(compiled.status.success(), "native build failed:\n{}", combined(&compiled));
+    let native = Command::new(project.join("target/debug/adapter"))
+        .current_dir(&project)
+        .env("NO_COLOR", "1")
+        .env(library_path_variable(), &libraries)
+        .output()
+        .expect("run the native executable");
+
+    assert_eq!(
+        combined(&interpreted),
+        combined(&native),
+        "the two execution modes disagree about the adapter"
+    );
+}

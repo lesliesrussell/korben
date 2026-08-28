@@ -34,7 +34,7 @@ One executable covers the standard workflow. Every command works on a project
 | `korben expand <file>` | Print macro expansion through the formatter |
 | `korben doc [--out <dir>]` | Markdown docs plus a machine-readable `api.json` |
 | `korben inspect` | The resolved project model |
-| `korben ffi [c <header>]` | List or generate foreign bindings |
+| `korben ffi [c <header>] [rust <file.rs>]` | List or generate foreign bindings |
 | `korben add <name> [--version <req>] [--path <dir>] [--dev]` | Declare a dependency |
 | `korben remove <name>` | Drop a dependency |
 | `korben update` | Re-resolve and rewrite the lockfile |
@@ -195,6 +195,14 @@ is a project rather than a file: two packages and a committed lockfile.
   `unsafe fn` carrying `!ffi` and `!unsafe` — safe Korben wrappers are the
   ordinary user-facing form. A null `CStr` or pointer marshals to `None`, so
   foreign null never becomes a Korben value. `examples/ffi.kb` calls libc.
+- **The Rust adapter ABI.** `#[korben_export]` marks a function in a Rust
+  library, adding an `extern "C"` shim beside it without changing the function;
+  `korben ffi rust <file.rs>` writes the Korben half from the same signatures.
+  Both halves are rendered from one reading of the signature, so they cannot
+  disagree about a type or a symbol. Failure and panic share one channel, and
+  every generated wrapper returns a `Result` even where the Rust function does
+  not, because the boundary can fail where the function cannot.
+  `examples/adapter/` is one library with both halves in it.
 - **Structured concurrency.** `async fn`, `await`, `task-scope`, `spawn`,
   `join-all`, cooperative cancellation, and typed bounded or unbounded
   channels. `await` outside asynchronous code is a compile error.
@@ -324,10 +332,6 @@ Not yet implemented, and reported as such rather than stubbed silently:
   across a function boundary, so returning a borrow is checked by types alone.
 - **`Shared` and `Managed`.** Both are recognized as ownership categories, but
   neither has a runtime representation yet, so there is no way to construct one.
-- **The Rust adapter ABI** (specification 17.3). `[ffi] rust = [...]` parses and
-  `korben ffi` reports it, but the `korben-export` adapter is not implemented.
-  C interoperation is complete enough to consume a Rust library through a
-  `#[no_mangle] extern "C"` surface.
 - **Foreign callbacks and structs by value.** A pointer is carried opaquely,
   never dereferenced, and never freed on Korben's behalf; specification 17.1's
   ownership-transfer annotations are not implemented. Function pointers and
@@ -359,6 +363,11 @@ Sharp edges worth knowing:
 - `korben ffi c` reads the prototype subset that appears in ordinary headers.
   Extraction through libclang, which would follow typedefs and macros, is future
   work; declarations it cannot type are listed rather than guessed at.
+- The Rust adapter carries `i64`, `f64`, `bool`, `&str`, and `String`, plus
+  `Result<T, E>` for any printable `E`. Callbacks, structs by value, generics,
+  and `async` are declined by name rather than guessed at, and a returned string
+  is valid until the next call on that thread -- which is the contract Korben
+  already relies on, since it copies a foreign string as it unmarshals it.
 - A string literal inside a `{...}` interpolation hole must be escaped:
   `(format "{(str \"a\" \"b\")}")`. Write `{{` and `}}` for literal braces.
 
@@ -380,7 +389,7 @@ is ready. All ten hold today:
 | 5 | Format and test with built-in commands | `korben fmt`, `korben test` |
 | 6 | Explore it in a project-aware REPL | `korben repl`, with `:type` |
 | 7 | Produce a native release binary | `korben build --release` |
-| 8 | Consume a C library through a generated binding and safe wrapper | `korben ffi c`, `examples/ffi.kb` |
+| 8 | Consume a C library through a generated binding and safe wrapper | `korben ffi c`, `examples/ffi.kb`, `examples/adapter/` |
 | 9 | Readable errors for type, macro, exhaustiveness, and ownership faults | `examples/ownership.kb` |
 | 10 | Reproduce the build from a lockfile without install scripts | `examples/packages/`, `korben audit` |
 
@@ -398,8 +407,12 @@ crates/
                    core IR, the native backend, project loading, docs
   korben-lsp/      the language server: JSON-RPC, positions, editor queries
   korben-cli/      the `korben` executable
+  korben-adapter/  the signature subset the Rust adapter boundary carries
+  korben-export/   what a Rust library depends on to be called from Korben
+  korben-export-macro/  the `#[korben_export]` attribute
 examples/          runnable programs, covered by the test suite;
-                   `packages/` is a two-package project with a committed lock
+                   `packages/` is a two-package project with a committed lock,
+                   `adapter/` a Rust library with both halves of its boundary
 spec.md            the language and platform specification
 ```
 
@@ -411,9 +424,10 @@ native builds reproducible and offline.
 ## Development
 
 ```sh
-cargo test              # 200 tests: reader, formatter, evaluator, checker,
-                        # ownership, concurrency, FFI, HTTP, packaging, CLI,
-                        # and interpreter-vs-native differential tests
+cargo test              # 315 tests: reader, formatter, evaluator, checker,
+                        # ownership, concurrency, FFI, the Rust adapter, HTTP,
+                        # packaging, CLI, and interpreter-vs-native
+                        # differential tests
 cargo clippy --workspace --all-targets
 cargo fmt
 ```
