@@ -35,6 +35,12 @@
   dependency in a single-package project, which is why this went unnoticed, and
   diverge for a workspace member or a transitive path dependency -- where the
   recorded path resolved against the wrong directory.
+- `korben check` reports a name declared twice in one module. It had been
+  caught only by the native backend, as a Rust compile failure the user was
+  told to report as a compiler bug -- and the two execution modes disagreed
+  about it, the interpreter keeping the later definition where the backend
+  refused to compile. Values and types are separate namespaces, so a record
+  declaring both a type and a constructor is still fine.
 - `korben check` reports unbound names. It had left them to the evaluator,
   which meant a module calling an undefined function checked clean and only
   failed once a run reached that line -- and `korben check` never runs the

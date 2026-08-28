@@ -254,3 +254,82 @@ fn names_that_do_resolve_stay_quiet() {
     )
     .is_empty());
 }
+
+// ----------------------------------------------------- duplicate declarations
+
+// korben-707
+#[test]
+fn a_name_declared_twice_is_reported() {
+    // The two execution modes disagreed about this: the interpreter kept the
+    // later definition, and the native backend refused to compile.
+    assert_eq!(check("(fn f [] -> Int 1)\n(fn f [] -> Int 2)"), vec!["duplicate-definition"]);
+}
+
+#[test]
+fn a_duplicate_points_at_both_declarations() {
+    let messages = check_messages("(fn f [] -> Int 1)\n(fn f [] -> Int 2)");
+    assert_eq!(
+        messages,
+        vec!["`f` is declared twice in this module -- rename one of them, or remove the one that is not wanted"]
+    );
+}
+
+#[test]
+fn duplicates_are_reported_for_every_kind_of_declaration() {
+    for source in [
+        "(type T {a: Int})\n(type T {b: Int})",
+        "(enum E (A x: Int) (A y: Int))",
+        // A constructor and a function share the value namespace.
+        "(enum E (F x: Int))\n(fn F [] -> Int 1)",
+        // As do a record's constructor and a function.
+        "(type R {a: Int})\n(fn R [] -> Int 1)",
+        // And two protocols declaring the same method.
+        "(protocol P (go [self] -> Int))\n(protocol Q (go [self] -> Int))",
+    ] {
+        assert_eq!(check(source), vec!["duplicate-definition"], "not reported for:\n{source}");
+    }
+}
+
+#[test]
+fn a_duplicate_protocol_reports_its_name_and_its_methods() {
+    // Two mistakes, not one: the protocol's name collides, and so does every
+    // method it declares.
+    assert_eq!(
+        check("(protocol P (go [self] -> Int))\n(protocol P (go [self] -> Int))"),
+        vec!["duplicate-definition", "duplicate-definition"]
+    );
+}
+
+#[test]
+fn a_type_and_its_constructor_are_not_a_duplicate() {
+    // `(type Point ...)` declares the type `Point` and the constructor
+    // `Point`. That is one declaration in each namespace, not a collision.
+    assert!(check("(type Point {x: Int y: Int})\n(fn f [] -> Point (Point {x 1 y 2}))").is_empty());
+}
+
+#[test]
+fn an_enum_and_a_type_of_the_same_name_in_different_modules_are_fine() {
+    // Modules have their own namespaces, so the same name in two of them is
+    // exactly what per-module scoping is for.
+    let mut session = korben_core::project::Session::bare(std::path::PathBuf::from("."));
+    let _ = session.load_text("one", "(module one)\n(pub fn handle [] -> Int 1)\n");
+    let _ = session.load_text("two", "(module two)\n(pub fn handle [] -> Int 2)\n");
+    korben_core::infer::check_session(&mut session, false);
+    let codes: Vec<String> = session
+        .diagnostics
+        .items
+        .iter()
+        .filter(|item| item.is_error())
+        .filter_map(|item| item.code.clone())
+        .collect();
+    assert!(codes.is_empty(), "{codes:?}");
+}
+
+#[test]
+fn three_declarations_of_a_name_report_twice() {
+    // Each redeclaration is its own mistake to fix.
+    assert_eq!(
+        check("(fn f [] -> Int 1)\n(fn f [] -> Int 2)\n(fn f [] -> Int 3)"),
+        vec!["duplicate-definition", "duplicate-definition"]
+    );
+}

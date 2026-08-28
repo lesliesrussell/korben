@@ -17,6 +17,11 @@ use std::rc::Rc;
 
 /// Analyze every loaded module.
 pub fn check_session(session: &mut Session, strict_api: bool) {
+    // korben-707
+    // A name declared twice makes every later answer about it arbitrary, so it
+    // is settled before inference rather than after.
+    let duplicates = crate::scope::duplicate_declarations(&session.modules);
+    session.diagnostics.extend(duplicates);
     let mut checker = Checker::new(strict_api);
     checker.namespace = crate::scope::Namespace::build(&session.modules);
     // Nominal declarations across all modules are visible to the checker; the
