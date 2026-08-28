@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.8.0 — Milestone C
+
+The native and safe systems boundary is complete. A Rust library can be called
+through an adapter generated from one reading of its signatures, and a build can
+target any triple the toolchain has. Alongside it: a language server, local
+workspaces, and an HTTP server that serves connections concurrently — reached
+without a task ever suspending, on the second design, after the first was built
+and measured and found wanting.
 
 ### Added
 
