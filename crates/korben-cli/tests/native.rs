@@ -552,11 +552,32 @@ fn a_rust_adapter_agrees_between_execution_modes() {
     let scratch = Scratch::new("adapter");
     let rust_target = scratch.path().join("rust");
 
-    // Build the Rust half where the manifest lives, so its path dependency on
-    // korben-export still resolves, but with its output in the scratch.
+    // korben-bve
+    // Copy the crate out of the checkout before building it. Building it where
+    // it lives lets cargo rewrite the committed `Cargo.lock` -- which it did,
+    // silently, whenever the workspace version had moved -- and makes two
+    // concurrent runs contend over that file. Only the path to korben-export
+    // has to change, and the lockfile does not record it.
+    let source = scratch.path().join("adapter");
+    std::fs::create_dir_all(source.join("src")).unwrap();
+    std::fs::copy(example.join("src/lib.rs"), source.join("src/lib.rs")).unwrap();
+    std::fs::copy(example.join("Cargo.lock"), source.join("Cargo.lock")).unwrap();
+    let export =
+        Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("crates").join("korben-export");
+    let manifest = std::fs::read_to_string(example.join("Cargo.toml")).unwrap();
+    let manifest = manifest.replace(
+        "korben-export = { path = \"../../crates/korben-export\" }",
+        &format!("korben-export = {{ path = {:?} }}", export.display().to_string()),
+    );
+    assert!(manifest.contains("korben-export"), "the adapter manifest changed shape");
+    std::fs::write(source.join("Cargo.toml"), manifest).unwrap();
+
+    // `--locked` because the copy carries the committed lockfile: a lockfile
+    // that has fallen behind the workspace version now fails here instead of
+    // being quietly rewritten in place.
     let built = Command::new("cargo")
-        .args(["build", "--manifest-path"])
-        .arg(example.join("Cargo.toml"))
+        .args(["build", "--locked", "--manifest-path"])
+        .arg(source.join("Cargo.toml"))
         .arg("--target-dir")
         .arg(&rust_target)
         .output()
