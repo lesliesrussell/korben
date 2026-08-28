@@ -333,3 +333,10 @@ fn three_declarations_of_a_name_report_twice() {
         vec!["duplicate-definition", "duplicate-definition"]
     );
 }
+
+// korben-wzh
+#[test]
+fn a_def_annotation_is_checked_against_its_value() {
+    assert_eq!(check("(def limit: Int \"forty-two\")\n(fn main [] limit)"), vec!["type-mismatch"]);
+    assert!(check("(def limit: Int 42)\n(fn main [] limit)").is_empty());
+}

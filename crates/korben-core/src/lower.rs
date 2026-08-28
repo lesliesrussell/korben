@@ -287,7 +287,7 @@ impl<'a> Lowerer<'a> {
                     );
                     return None;
                 };
-                let (name, ty, rest) = self.split_annotation(name, &items[2..], form.span);
+                let (name, ty, rest) = self.split_annotation(name, &items[2..]);
                 let value = match rest.first() {
                     Some(value) => self.expr(value),
                     None => {
@@ -1064,17 +1064,8 @@ impl<'a> Lowerer<'a> {
         };
         // `(let name: Type value)` or `(let pattern value)`.
         if let Some(raw) = target.as_symbol() {
-            let mut index = 2usize;
-            let (name, ty, _) = {
-                let (name, ty, _) = self.split_annotation(raw, &[], form.span);
-                if raw.ends_with(':') {
-                    let annotated = self.type_run(&items, &mut index);
-                    (name, annotated, ())
-                } else {
-                    (name, ty, ())
-                }
-            };
-            let value = match items.get(index) {
+            let (name, ty, rest) = self.split_annotation(raw, &items[2..]);
+            let value = match rest.first() {
                 Some(value) => self.expr(value),
                 None => {
                     self.error(
@@ -1118,10 +1109,8 @@ impl<'a> Lowerer<'a> {
             );
             return Stmt::Expr(Expr::Nil(form.span));
         };
-        let mut index = 2usize;
-        let name = raw.strip_suffix(':').unwrap_or(raw).to_string();
-        let ty = if raw.ends_with(':') { self.type_run(&items, &mut index) } else { None };
-        let value = match items.get(index) {
+        let (name, ty, rest) = self.split_annotation(raw, &items[2..]);
+        let value = match rest.first() {
             Some(value) => self.expr(value),
             None => {
                 self.error(
@@ -1135,13 +1124,22 @@ impl<'a> Lowerer<'a> {
         Stmt::Var { name, ty, value, span: form.span }
     }
 
-    fn split_annotation(
+    // korben-wzh
+    /// Split an annotated binding name: `name:` followed by a type, then
+    /// whatever the form still has to say. Without the colon there is no
+    /// annotation and `rest` is untouched.
+    fn split_annotation<'s>(
         &mut self,
         raw: &str,
-        _rest: &[Syntax],
-        _span: Span,
-    ) -> (String, Option<TypeExpr>, Vec<Syntax>) {
-        (raw.strip_suffix(':').unwrap_or(raw).to_string(), None, Vec::new())
+        rest: &'s [Syntax],
+    ) -> (String, Option<TypeExpr>, &'s [Syntax]) {
+        let name = raw.strip_suffix(':').unwrap_or(raw).to_string();
+        if !raw.ends_with(':') {
+            return (name, None, rest);
+        }
+        let mut index = 0usize;
+        let ty = self.type_run(rest, &mut index);
+        (name, ty, &rest[index..])
     }
 
     // ----------------------------------------------------------- expressions

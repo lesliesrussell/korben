@@ -338,3 +338,26 @@ fn private_declarations_are_not_importable() {
         session.diagnostics.items.iter().filter_map(|item| item.code.clone()).collect();
     assert!(codes.contains(&"unknown-export".to_string()), "{codes:?}");
 }
+
+// korben-wzh
+#[test]
+fn a_top_level_def_binds_a_constant() {
+    let result = run("(def limit 42)\n(fn main [] (println limit))");
+    assert_eq!(result.diagnostics, Vec::<String>::new());
+    assert_eq!(result.output, "42\n");
+}
+
+// korben-wzh
+#[test]
+fn a_def_may_carry_a_type_annotation() {
+    let result = run("(def limit: Int 42)\n(fn main [] (println limit))");
+    assert_eq!(result.diagnostics, Vec::<String>::new());
+    assert_eq!(result.output, "42\n");
+}
+
+// korben-wzh
+#[test]
+fn a_def_without_a_value_is_reported() {
+    let result = run("(def limit)\n(fn main [] 1)");
+    assert_eq!(result.diagnostics, vec!["def-value"]);
+}

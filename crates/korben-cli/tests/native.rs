@@ -406,3 +406,22 @@ fn structured_concurrency_agrees_between_execution_modes() {
 "#,
     );
 }
+
+// korben-wzh
+#[test]
+fn top_level_constants_agree_between_execution_modes() {
+    assert_same(
+        "constants",
+        "constants",
+        r#"(module constants)
+
+(def limit: Int 42)
+(def greeting "hello")
+(def sizes [1 2 3])
+
+(pub fn main [] -> Unit !io
+  (println limit greeting sizes)
+  (println (+ limit 1) (len sizes)))
+"#,
+    );
+}

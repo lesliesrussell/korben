@@ -41,6 +41,11 @@
   about it, the interpreter keeping the later definition where the backend
   refused to compile. Values and types are separate namespaces, so a record
   declaring both a type and a constructor is still fine.
+- `(def name value)` works. `split_annotation` was a stub that discarded the
+  forms after the name, so every top-level `def` failed with "`def` needs a
+  value" and an annotation was never read. Nothing in the repository, prelude,
+  or examples used `def`, which is why it went unnoticed. `let` and `var` now
+  share the repaired helper rather than each reading annotations their own way.
 - `korben check` reports unbound names. It had left them to the evaluator,
   which meant a module calling an undefined function checked clean and only
   failed once a run reached that line -- and `korben check` never runs the
