@@ -129,7 +129,9 @@ pub fn spawn(scope: &Value, thunk: Value, loc: Loc) -> Outcome {
 }
 
 /// Run one ready task from the open scopes. Returns false when none is ready.
-fn drive_one(caller: &mut dyn Caller) -> Option<Result<(), Flow>> {
+/// Run one ready task, if there is one. This is what lets an operation that
+/// would block let something else make progress instead of stalling.
+pub(crate) fn drive_one(caller: &mut dyn Caller) -> Option<Result<(), Flow>> {
     let ready = SCOPES.with(|scopes| {
         for scope in scopes.borrow().iter().rev() {
             for task in scope.tasks.borrow().iter() {
