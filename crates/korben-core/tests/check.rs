@@ -340,3 +340,34 @@ fn a_def_annotation_is_checked_against_its_value() {
     assert_eq!(check("(def limit: Int \"forty-two\")\n(fn main [] limit)"), vec!["type-mismatch"]);
     assert!(check("(def limit: Int 42)\n(fn main [] limit)").is_empty());
 }
+
+// korben-95f
+#[test]
+fn a_function_a_macro_makes_unreachable_is_reported() {
+    // Expansion runs before evaluation and a call site cannot tell the two
+    // apart, so the macro always wins and the function is dead code.
+    assert_eq!(
+        lint("(fn twice [n: Int] -> Int (* 2 n))\n(macro twice [form] `(do ~form ~form))"),
+        vec!["shadowed-by-macro"]
+    );
+    // The order they are written in does not change which one wins.
+    assert_eq!(
+        lint("(macro twice [form] `(do ~form ~form))\n(fn twice [n: Int] -> Int (* 2 n))"),
+        vec!["shadowed-by-macro"]
+    );
+}
+
+// korben-95f
+#[test]
+fn a_constant_a_macro_makes_unreachable_is_reported() {
+    assert_eq!(lint("(def limit 42)\n(macro limit [] `1)"), vec!["shadowed-by-macro"]);
+}
+
+// korben-95f
+#[test]
+fn a_macro_or_a_function_on_its_own_is_not_reported() {
+    assert!(lint("(macro twice [form] `(do ~form ~form))").is_empty());
+    assert!(lint("(fn twice [n: Int] -> Int (* 2 n))").is_empty());
+    // A different name is not a collision, however similar.
+    assert!(lint("(fn twice-over [n: Int] -> Int (* 2 n))\n(macro twice [form] `~form)").is_empty());
+}
