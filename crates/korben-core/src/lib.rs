@@ -22,5 +22,6 @@ pub mod project;
 pub mod scope;
 pub mod types;
 pub mod value;
+pub mod workspace;
 
 pub use korben_syntax as syntax;

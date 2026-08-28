@@ -74,6 +74,93 @@ fn planned_commands_say_which_milestone_they_land_in() {
     assert!(combined(&output).contains("Milestone"));
 }
 
+// korben-mic
+/// Write a workspace: a virtual root, a library, and a program that uses it.
+fn workspace(scratch: &Scratch) {
+    let root = scratch.path();
+    std::fs::write(root.join("korben.toml"), "[workspace]\nmembers = [\"lib\", \"app\"]\n")
+        .expect("write root manifest");
+
+    std::fs::create_dir_all(root.join("lib").join("src")).expect("create lib");
+    std::fs::write(
+        root.join("lib").join("korben.toml"),
+        "[package]\nname = \"lib\"\nversion = \"1.0.0\"\nlicense = \"MIT\"\nmain = \"lib\"\n",
+    )
+    .expect("write lib manifest");
+    std::fs::write(
+        root.join("lib").join("src").join("lib.kb"),
+        "(module lib)\n\n;;; Greet someone.\n(pub fn hello [name: String] -> String\n  (format \"Hello, {name}!\"))\n",
+    )
+    .expect("write lib source");
+
+    std::fs::create_dir_all(root.join("app").join("src")).expect("create app");
+    std::fs::write(
+        root.join("app").join("korben.toml"),
+        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nlicense = \"MIT\"\nmain = \"main\"\n\n[dependencies]\nlib = \"^1.0\"\n",
+    )
+    .expect("write app manifest");
+    std::fs::write(
+        root.join("app").join("src").join("main.kb"),
+        "(module main\n  (use lib :as lib))\n\n;;; Entry.\n(pub fn main [] -> Unit !io (println (lib.hello \"Ada\")))\n",
+    )
+    .expect("write app source");
+}
+
+#[test]
+fn a_workspace_checks_every_member_and_locks_them_together() {
+    let scratch = Scratch::new("workspace-check");
+    workspace(&scratch);
+
+    let check = korben(scratch.path(), &["check"]);
+    assert!(check.status.success(), "{}", combined(&check));
+    // Both members, not just whichever one the root stands in for.
+    assert!(stdout(&check).contains("2 modules"), "{}", stdout(&check));
+
+    // One lock, at the workspace root.
+    assert!(scratch.path().join("korben.lock").is_file(), "no lock at the root");
+    assert!(!scratch.path().join("app").join("korben.lock").is_file(), "a member wrote a lock");
+}
+
+#[test]
+fn a_workspace_runs_and_builds_the_member_that_has_the_program() {
+    let scratch = Scratch::new("workspace-build");
+    workspace(&scratch);
+
+    let run = korben(scratch.path(), &["run"]);
+    assert!(run.status.success(), "{}", combined(&run));
+    assert!(stdout(&run).contains("Hello, Ada!"), "{}", stdout(&run));
+
+    // The artifact is named and placed for the member being built, not for
+    // whichever member the session happened to open on.
+    let build = korben(scratch.path(), &["build"]);
+    assert!(build.status.success(), "{}", combined(&build));
+    assert!(
+        scratch.path().join("app").join("target").join("debug").join("app").is_file(),
+        "the executable is not where `app` should have put it:\n{}",
+        combined(&build)
+    );
+}
+
+#[test]
+fn a_workspace_with_two_programs_asks_which_one() {
+    let scratch = Scratch::new("workspace-ambiguous");
+    workspace(&scratch);
+    // Give `lib` a `main` too, so neither member is the obvious choice.
+    std::fs::write(
+        scratch.path().join("lib").join("src").join("lib.kb"),
+        "(module lib)\n\n;;; Entry.\n(pub fn main [] -> Unit !io (println \"lib\"))\n",
+    )
+    .expect("write");
+
+    let run = korben(scratch.path(), &["run"]);
+    assert!(!run.status.success(), "it guessed instead of asking");
+    assert!(combined(&run).contains("--package"), "{}", combined(&run));
+
+    let chosen = korben(scratch.path(), &["run", "--package", "lib"]);
+    assert!(chosen.status.success(), "{}", combined(&chosen));
+    assert!(stdout(&chosen).contains("lib"), "{}", stdout(&chosen));
+}
+
 // korben-efd
 #[test]
 fn the_language_server_speaks_the_protocol_on_stdin_and_stdout() {

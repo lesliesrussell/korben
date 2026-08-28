@@ -91,7 +91,7 @@ fn print_help() {
     println!("  update                                    re-resolve and rewrite the lockfile");
     println!("  audit                                     verify the lockfile and checksums\n");
     println!("{}", ui::bold("DEVELOP"));
-    println!("  run [entry] [-- args...]                  run the project or a single file");
+    println!("  run [entry] [--package <name>] [-- args...]  run a project, member, or file");
     println!("  dev                                       check, test, then run");
     println!("  check [--json] [--strict-api]             type, effect, and ownership analysis");
     println!("  test [filter] [--json]                    run tests and property tests");
@@ -107,6 +107,43 @@ fn print_help() {
     println!("{}", ui::bold("OTHER"));
     println!("  version                                   print the toolchain version");
     println!("  help                                      print this message");
+}
+
+// korben-mic
+/// The entry module `run` and `build` should act on.
+///
+/// A workspace has more than one package, so which program is meant becomes a
+/// real question. `--package` answers it; otherwise the sole member declaring
+/// an entry point does, and anything else is an error that lists the choices
+/// rather than a guess.
+fn entry_module(session: &mut Session, flags: &Flags) -> Result<String, String> {
+    let requested = flags.value("package");
+    let chosen = match &session.workspace {
+        Some(workspace) => {
+            let member = workspace.program(requested)?;
+            Some((member.name.clone(), member.manifest.main.clone()))
+        }
+        None => {
+            if let Some(name) = requested {
+                if name != session.manifest.name {
+                    return Err(format!(
+                        "this project is not a workspace, and its only package is `{}`",
+                        session.manifest.name
+                    ));
+                }
+            }
+            None
+        }
+    };
+    match chosen {
+        // The session was opened on a stand-in member; point it at the one
+        // actually being built, so the artifact is named and placed correctly.
+        Some((package, entry)) => {
+            session.focus(&package);
+            Ok(entry)
+        }
+        None => Ok(session.manifest.main.clone()),
+    }
 }
 
 // korben-efd
@@ -379,10 +416,13 @@ fn cmd_run(args: &[String]) -> ExitCode {
     let loaded = match &entry {
         Some(path) if path.exists() => session.load_file(path, None),
         Some(name) => session.load_module(&name.to_string_lossy(), Span::synthetic()),
-        None => {
-            let main = session.manifest.main.clone();
-            session.load_module(&main, Span::synthetic())
-        }
+        None => match entry_module(&mut session, &flags) {
+            Ok(main) => session.load_module(&main, Span::synthetic()),
+            Err(error) => {
+                eprintln!("{} {error}", ui::red("error:"));
+                return ExitCode::FAILURE;
+            }
+        },
     };
 
     // Korben is statically typed, so running checks first: the same programs
@@ -802,7 +842,13 @@ fn cmd_build(args: &[String]) -> ExitCode {
             .last()
             .map(|module| module.name.clone())
             .unwrap_or_else(|| session.manifest.main.clone()),
-        _ => session.manifest.main.clone(),
+        _ => match entry_module(&mut session, &flags) {
+            Ok(main) => main,
+            Err(error) => {
+                eprintln!("{} {error}", ui::red("error:"));
+                return ExitCode::FAILURE;
+            }
+        },
     };
     let program = match korben_core::ir::lower_session(&session, &entry) {
         Ok(program) => program,
@@ -1399,6 +1445,16 @@ fn cmd_inspect(args: &[String]) -> ExitCode {
     if ui::report(&session.diagnostics, &session.sources, false) {
         return ExitCode::FAILURE;
     }
+    // korben-mic
+    if let Some(workspace) = &session.workspace {
+        println!("{}", ui::bold("workspace"));
+        println!("  root         {}", workspace.root.display());
+        for member in &workspace.members {
+            let kind = if member.has_program() { "program" } else { "library" };
+            println!("  {} {} ({kind})", ui::green("member"), member.name);
+        }
+        println!();
+    }
     for module in &session.modules {
         println!("{}", ui::bold(&module.name));
         for import in &module.imports {
@@ -1477,13 +1533,23 @@ pub fn load_all(session: &mut Session, flags: &Flags) {
             return;
         }
     }
-    let src = session.src_dir();
-    for path in project::source_files(&src) {
-        let name = module_name_for(&src, &path);
-        let _ = session.load_module(&name, Span::synthetic());
-    }
-    for path in project::source_files(&session.root.join("tests")) {
-        let _ = session.load_file(&path, None);
+    // korben-mic
+    // In a workspace every member is loaded, so `check`, `test`, and `lint` at
+    // the root say something about the whole repository rather than about
+    // whichever member the caller happened to be standing in.
+    let roots: Vec<PathBuf> = match &session.workspace {
+        Some(workspace) => workspace.members.iter().map(|member| member.root.clone()).collect(),
+        None => vec![session.root.clone()],
+    };
+    for root in roots {
+        let src = root.join("src");
+        for path in project::source_files(&src) {
+            let name = module_name_for(&src, &path);
+            let _ = session.load_module(&name, Span::synthetic());
+        }
+        for path in project::source_files(&root.join("tests")) {
+            let _ = session.load_file(&path, None);
+        }
     }
 }
 
@@ -1571,5 +1637,6 @@ fn takes_value(name: &str) -> bool {
             | "module"
             | "path"
             | "version"
+            | "package"
     )
 }

@@ -43,6 +43,9 @@ One executable covers the standard workflow. Every command works on a project
 | `korben build [--release] [--emit ir\|rust]` | Compile to a native executable |
 | `korben lsp` | Language server, over stdin and stdout |
 
+In a workspace, `check`, `test`, `fmt`, and `lint` cover every member, while
+`run` and `build` take `--package <name>` to say which program is meant.
+
 Diagnostics carry a concise explanation, source spans, expected-versus-found
 types in source-level names, and confidence-safe suggestions. `--json` emits the
 stable machine-readable form for editors and CI.
@@ -180,6 +183,14 @@ is a project rather than a file: two packages and a committed lockfile.
 - **Structured concurrency.** `async fn`, `await`, `task-scope`, `spawn`,
   `join-all`, cooperative cancellation, and typed bounded or unbounded
   channels. `await` outside asynchronous code is a compile error.
+- **Workspaces.** A `[workspace] members = [...]` root gathers several packages
+  in one repository, resolved in a single pass and pinned by a single
+  `korben.lock` at the root -- so two members that share a dependency share the
+  version of it, which is the reason to keep them in one repository. A member
+  may depend on a sibling by name, with no path. Sharing a workspace grants no
+  access: an import still needs a declared dependency. Members are not
+  checksummed, because they are source being edited rather than pinned
+  artifacts; everything from outside the workspace still is.
 - **Editor support.** `korben lsp` speaks the Language Server Protocol over
   stdin and stdout, with no dependency beyond the toolchain itself. Diagnostics
   republish as you type and read from the unsaved buffer, not the file on disk.
@@ -274,6 +285,7 @@ Implemented:
   shared by both execution modes.
 - Dependency resolution, a pinned lockfile with SHA-256 checksums, and
   reproducible builds over path and local-registry sources.
+- Workspaces: several packages in one repository, resolved and locked together.
 - A language server: diagnostics, hover, go to definition, completion, document
   symbols, and formatting.
 - Canonical formatter, linter, documentation generator, project-aware REPL.
@@ -309,8 +321,8 @@ Not yet implemented, and reported as such rather than stubbed silently:
 - **A network registry** (Milestone D). Dependencies resolve from a directory on
   this machine — a path, or a registry root laid out as
   `<registry>/<name>/<version>/`. `korben publish` and `korben install` report
-  the milestone they land in. Package signing, git dependencies, workspaces, and
-  sandboxed build scripts are not implemented.
+  the milestone they land in. Package signing, git dependencies, and sandboxed
+  build scripts are not implemented.
 - **The rest of the language server** (specification 20.4). What is implemented
   is listed above. Rename with macro-hygiene awareness, find references, code
   actions, signature help, semantic tokens, and inlay hints are not, and the

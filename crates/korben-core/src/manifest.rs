@@ -70,6 +70,11 @@ pub struct Manifest {
     pub ffi_c: Vec<String>,
     /// `[ffi] rust = [...]` — Rust adapter crates.
     pub ffi_rust: Vec<String>,
+    /// `[workspace] members = [...]` — directories this manifest gathers.
+    pub members: Vec<String>,
+    /// True when the manifest declares `[workspace]` but no `[package]`: a root
+    /// that gathers members without being a package itself.
+    pub is_virtual: bool,
     pub path: Option<PathBuf>,
 }
 
@@ -90,6 +95,8 @@ impl Manifest {
             build_capabilities: Vec::new(),
             ffi_c: Vec::new(),
             ffi_rust: Vec::new(),
+            members: Vec::new(),
+            is_virtual: false,
             path: None,
         }
     }
@@ -99,12 +106,24 @@ impl Manifest {
     pub fn parse(text: &str, path: Option<PathBuf>) -> Result<Manifest, String> {
         let tables = parse_tables(text)?;
         let package = tables.get("package");
-        let name = package
-            .and_then(|table| table.get("name"))
-            .and_then(TomlValue::as_str)
-            .ok_or_else(|| "manifest is missing `[package] name`".to_string())?
-            .to_string();
+        let workspace = tables.get("workspace");
+        // korben-mic
+        // A workspace root may gather members without being a package itself,
+        // so `[package]` is required only when there is no `[workspace]`.
+        let declared = package.and_then(|table| table.get("name")).and_then(TomlValue::as_str);
+        let name = match (declared, workspace) {
+            (Some(name), _) => name.to_string(),
+            (None, Some(_)) => root_name(path.as_deref()),
+            (None, None) => return Err("manifest is missing `[package] name`".to_string()),
+        };
         let mut manifest = Manifest::default_for(&name);
+        manifest.is_virtual = declared.is_none();
+        if let Some(workspace) = workspace {
+            if let Some(TomlValue::Array(items)) = workspace.get("members") {
+                manifest.members =
+                    items.iter().filter_map(|item| item.as_str().map(str::to_string)).collect();
+            }
+        }
         manifest.path = path;
         if let Some(package) = package {
             if let Some(value) = package.get("version").and_then(TomlValue::as_str) {
@@ -208,6 +227,12 @@ impl Manifest {
         Ok(manifest)
     }
 
+    // korben-mic
+    /// True when this manifest gathers members.
+    pub fn is_workspace(&self) -> bool {
+        !self.members.is_empty()
+    }
+
     fn dependency_mut(&mut self, dev: bool) -> &mut Vec<Dependency> {
         if dev {
             &mut self.dev_dependencies
@@ -261,6 +286,16 @@ impl Manifest {
         out.push_str(&format!("opt-level = {}\n", self.opt_level));
         out
     }
+}
+
+// korben-mic
+/// The name a virtual workspace root goes by: its directory, so diagnostics and
+/// the lockfile have something to say rather than an empty string.
+fn root_name(path: Option<&Path>) -> String {
+    path.and_then(Path::parent)
+        .and_then(Path::file_name)
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "workspace".to_string())
 }
 
 /// Render dependencies, using the long form only where it is needed.

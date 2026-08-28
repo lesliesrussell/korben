@@ -4,6 +4,13 @@
 
 ### Added
 
+- **Workspaces.** A `[workspace] members = [...]` root gathers several packages
+  in one repository. One resolution pass covers every member and one
+  `korben.lock` at the root pins the result, so members that share a dependency
+  share the version of it. A member may depend on a sibling by name with no
+  path. `check`, `test`, `fmt`, and `lint` cover every member; `run` and `build`
+  take `--package <name>`, and refuse to guess when a workspace has more than
+  one program.
 - **A language server.** `korben lsp` speaks the Language Server Protocol over
   stdin and stdout: workspace diagnostics, hover, go to definition, completion,
   document symbols, and formatting. It has no dependency outside the toolchain
@@ -23,6 +30,11 @@
 
 ### Fixed
 
+- A path dependency is recorded in the lockfile relative to the lockfile rather
+  than to the manifest that declared it. The two coincide for a top-level
+  dependency in a single-package project, which is why this went unnoticed, and
+  diverge for a workspace member or a transitive path dependency -- where the
+  recorded path resolved against the wrong directory.
 - `korben check` reports unbound names. It had left them to the evaluator,
   which meant a module calling an undefined function checked clean and only
   failed once a run reached that line -- and `korben check` never runs the

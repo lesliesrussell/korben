@@ -61,6 +61,8 @@ pub struct Session {
     missing: HashSet<String>,
     /// Unsaved editor buffers, keyed by path, read in place of the file.
     overlay: HashMap<PathBuf, String>,
+    /// The workspace this package belongs to, when it belongs to one.
+    pub workspace: Option<crate::workspace::Workspace>,
 }
 
 impl Session {
@@ -82,6 +84,7 @@ impl Session {
             loading: Vec::new(),
             missing: HashSet::new(),
             overlay: HashMap::new(),
+            workspace: None,
         };
         session.load_prelude();
         session
@@ -94,6 +97,23 @@ impl Session {
         })?;
         let manifest = Manifest::load(&manifest_path)?;
         let root = manifest_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        // korben-mic
+        // A workspace changes where the lockfile lives and what resolution
+        // covers, but not which package this session is for: `root` and
+        // `manifest` stay the member the caller is standing in.
+        let workspace = crate::workspace::Workspace::find(start)?;
+        let (root, manifest) = match &workspace {
+            Some(workspace) if manifest.is_virtual => {
+                // Standing at a bare workspace root, there is no one package.
+                // The first member stands in so that a session still has a
+                // name; commands that need a specific program ask for one.
+                match workspace.members.first() {
+                    Some(member) => (member.root.clone(), member.manifest.clone()),
+                    None => (root, manifest),
+                }
+            }
+            _ => (root, manifest),
+        };
         let mut session = Session {
             sources: SourceMap::new(),
             interp: Interp::new(),
@@ -109,6 +129,7 @@ impl Session {
             loading: Vec::new(),
             missing: HashSet::new(),
             overlay: HashMap::new(),
+            workspace,
         };
         session.load_prelude();
         session.prepare_dependencies()?;
@@ -122,6 +143,13 @@ impl Session {
     /// path, and resolution does not run. Otherwise the graph is resolved and
     /// the lock is written.
     fn prepare_dependencies(&mut self) -> Result<(), String> {
+        // korben-mic
+        // A workspace resolves once, at its root: members that share a
+        // dependency must share the version of it, which is only true if one
+        // pass sees every member's requirements together.
+        if self.workspace.is_some() {
+            return self.prepare_workspace_dependencies();
+        }
         use crate::pkg::{resolve, Lockfile, LOCK_NAME};
         let declared =
             !self.manifest.dependencies.is_empty() || !self.manifest.dev_dependencies.is_empty();
@@ -148,6 +176,60 @@ impl Session {
         self.lock_written = true;
         self.visibility = crate::pkg::visibility(&self.manifest, &self.resolution);
         Ok(())
+    }
+
+    // korben-mic
+    /// Resolve and lock a whole workspace at its root.
+    fn prepare_workspace_dependencies(&mut self) -> Result<(), String> {
+        use crate::pkg::{resolve_all, Lockfile, LOCK_NAME};
+        let workspace = self.workspace.clone().expect("a workspace");
+        let manifests: Vec<&Manifest> =
+            workspace.members.iter().map(|member| &member.manifest).collect();
+        let lock_path = workspace.root.join(LOCK_NAME);
+        let declared = workspace.members.iter().any(|member| {
+            !member.manifest.dependencies.is_empty() || !member.manifest.dev_dependencies.is_empty()
+        });
+
+        if lock_path.is_file() {
+            let lock = Lockfile::load(&lock_path)?;
+            if lock.matches_workspace(&manifests) {
+                self.resolution = lock.materialize(&workspace.root, &workspace.manifest)?;
+                self.visibility = self.workspace_visibility(&workspace);
+                return Ok(());
+            }
+        }
+        if !declared {
+            self.visibility = self.workspace_visibility(&workspace);
+            return Ok(());
+        }
+
+        let members: Vec<(String, PathBuf)> =
+            workspace.members.iter().map(|m| (m.name.clone(), m.root.clone())).collect();
+        self.resolution = resolve_all(&workspace.manifest, &workspace.demands(), &members)?;
+        let lock = Lockfile::from_workspace(&workspace.manifest.name, &manifests, &self.resolution);
+        std::fs::write(&lock_path, lock.render())
+            .map_err(|error| format!("cannot write {}: {error}", lock_path.display()))?;
+        self.lock_written = true;
+        self.visibility = self.workspace_visibility(&workspace);
+        Ok(())
+    }
+
+    /// What each member may import: its own dependencies, plus itself.
+    fn workspace_visibility(
+        &self,
+        workspace: &crate::workspace::Workspace,
+    ) -> std::collections::BTreeMap<String, std::collections::BTreeSet<String>> {
+        let mut map = std::collections::BTreeMap::new();
+        for member in &workspace.members {
+            let mut visible = crate::pkg::visibility(&member.manifest, &self.resolution);
+            if let Some(entry) = visible.remove(&member.name) {
+                map.insert(member.name.clone(), entry);
+            }
+            for (name, entry) in visible {
+                map.entry(name).or_insert(entry);
+            }
+        }
+        map
     }
 
     /// The package a loaded module belongs to.
@@ -187,6 +269,15 @@ impl Session {
     pub fn module_path(&self, name: &str) -> Option<(PathBuf, String)> {
         let relative = name.replace('.', "/");
         let mut roots: Vec<(PathBuf, String)> = vec![(self.src_dir(), self.manifest.name.clone())];
+        // korben-mic
+        // Every member's sources are reachable, so a workspace can be checked
+        // as a unit. Whether one member may import another is a separate
+        // question, answered by the visibility table.
+        if let Some(workspace) = &self.workspace {
+            for member in &workspace.members {
+                roots.push((member.root.join("src"), member.name.clone()));
+            }
+        }
         for package in &self.resolution.packages {
             roots.push((package.root.join("src"), package.name.clone()));
         }
@@ -282,6 +373,20 @@ impl Session {
         let file = self.sources.add_file(path, text.clone());
         let default_name = module_name.clone().unwrap_or_else(|| default_module_name(path));
         self.load_source(file, &text, default_name, module_name)
+    }
+
+    // korben-mic
+    /// Point this session at one workspace member.
+    ///
+    /// A session opened in a workspace carries a stand-in package so that it
+    /// has a name at all. `build` needs the real one: the artifact is named
+    /// after it and written under its directory, so building `app` must not
+    /// produce something called after whichever member came first.
+    pub fn focus(&mut self, name: &str) {
+        let Some(workspace) = &self.workspace else { return };
+        let Some(member) = workspace.member(name) else { return };
+        self.root = member.root.clone();
+        self.manifest = member.manifest.clone();
     }
 
     // korben-efd

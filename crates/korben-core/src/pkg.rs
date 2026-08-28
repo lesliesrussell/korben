@@ -212,6 +212,11 @@ pub enum Source {
     Path(String),
     /// A package directory inside a registry root.
     Registry(String),
+    // korben-mic
+    /// A sibling package in this workspace, relative to the workspace root.
+    /// Distinct from `Path` because it travels with the repository rather than
+    /// pointing outside it.
+    Member(String),
 }
 
 impl Source {
@@ -220,12 +225,16 @@ impl Source {
         match self {
             Source::Path(path) => format!("path+{path}"),
             Source::Registry(root) => format!("registry+{root}"),
+            Source::Member(path) => format!("member+{path}"),
         }
     }
 
     pub fn parse(text: &str) -> Option<Source> {
         if let Some(rest) = text.strip_prefix("path+") {
             return Some(Source::Path(rest.to_string()));
+        }
+        if let Some(rest) = text.strip_prefix("member+") {
+            return Some(Source::Member(rest.to_string()));
         }
         text.strip_prefix("registry+").map(|rest| Source::Registry(rest.to_string()))
     }
@@ -341,7 +350,30 @@ struct Demand {
 /// all of them is chosen. A name that cannot satisfy every requirement is a
 /// conflict, reported with the requirements and who made them.
 pub fn resolve(root: &Path, manifest: &Manifest) -> Result<Resolution, String> {
+    let seed = vec![(
+        manifest.name.clone(),
+        root.to_path_buf(),
+        manifest.dependencies.iter().chain(&manifest.dev_dependencies).cloned().collect(),
+    )];
+    resolve_all(manifest, &seed, &[])
+}
+
+// korben-mic
+/// Resolve several packages at once, as a workspace does.
+///
+/// `seed` is what each package declares, and `members` are the packages the
+/// workspace itself provides -- a member depended on by name resolves to the
+/// directory in this repository rather than to a registry, which is what makes
+/// members able to depend on each other without a path.
+pub fn resolve_all(
+    manifest: &Manifest,
+    seed: &[(String, PathBuf, Vec<Dependency>)],
+    members: &[(String, PathBuf)],
+) -> Result<Resolution, String> {
     let registry = registry_root(manifest);
+    // Sources are recorded relative to wherever the lockfile will sit, which is
+    // the directory of the manifest resolution was started from.
+    let lock_root = manifest.path.as_deref().and_then(Path::parent).unwrap_or(Path::new("."));
     let mut demands: BTreeMap<String, Vec<Demand>> = BTreeMap::new();
 
     // Resolution is a fixpoint. A requirement discovered deep in the graph can
@@ -351,11 +383,7 @@ pub fn resolve(root: &Path, manifest: &Manifest) -> Result<Resolution, String> {
     for _ in 0..MAX_RESOLUTION_PASSES {
         let mut chosen: BTreeMap<String, Package> = BTreeMap::new();
         let mut changed = false;
-        let mut queue: Vec<(String, PathBuf, Vec<Dependency>)> = vec![(
-            manifest.name.clone(),
-            root.to_path_buf(),
-            manifest.dependencies.iter().chain(&manifest.dev_dependencies).cloned().collect(),
-        )];
+        let mut queue: Vec<(String, PathBuf, Vec<Dependency>)> = seed.to_vec();
 
         while let Some((requirer, base, dependencies)) = queue.pop() {
             for dependency in dependencies {
@@ -390,7 +418,34 @@ pub fn resolve(root: &Path, manifest: &Manifest) -> Result<Resolution, String> {
                                 dependency.name, found.name
                             ));
                         }
-                        vec![(version, directory, Source::Path(relative.clone()))]
+                        // korben-mic
+                        // Recorded relative to the lockfile, not to the
+                        // manifest that wrote it. The two coincide for a
+                        // top-level dependency in a plain project, and diverge
+                        // for a workspace member or a transitive path
+                        // dependency -- where the old spelling resolved against
+                        // the wrong base.
+                        let recorded = relative_to(lock_root, &directory);
+                        vec![(version, directory, Source::Path(recorded))]
+                    }
+                    // A sibling in the same workspace is right here, and
+                    // reaching past it to a registry would be wrong even when
+                    // the registry has a package by that name.
+                    None if members.iter().any(|(name, _)| *name == dependency.name) => {
+                        let directory = members
+                            .iter()
+                            .find(|(name, _)| *name == dependency.name)
+                            .map(|(_, path)| path.clone())
+                            .expect("the member just matched");
+                        let found = Manifest::load(&directory.join(crate::project::MANIFEST_NAME))
+                            .map_err(|error| {
+                                format!("workspace member `{}`: {error}", dependency.name)
+                            })?;
+                        let version = Version::parse(&found.version).map_err(|error| {
+                            format!("workspace member `{}`: {error}", dependency.name)
+                        })?;
+                        let recorded = relative_to(lock_root, &directory);
+                        vec![(version, directory.clone(), Source::Member(recorded))]
                     }
                     None => {
                         let Some(registry) = &registry else {
@@ -470,6 +525,32 @@ fn conflict_message(name: &str, demands: &[Demand], registry: Option<&Path>) -> 
     lines.join("\n")
 }
 
+// korben-mic
+/// Express `target` relative to `base`, so a lockfile records a path that means
+/// the same thing on another machine.
+fn relative_to(base: &Path, target: &Path) -> String {
+    let base = normalize(base);
+    let target = normalize(target);
+    if let Ok(rest) = target.strip_prefix(&base) {
+        let text = rest.to_string_lossy().to_string();
+        return if text.is_empty() { ".".to_string() } else { text };
+    }
+    // Outside the root: climb to the nearest shared ancestor, then descend.
+    let base_parts: Vec<_> = base.components().collect();
+    let target_parts: Vec<_> = target.components().collect();
+    let shared =
+        base_parts.iter().zip(&target_parts).take_while(|(left, right)| left == right).count();
+    let mut parts: Vec<String> = vec!["..".to_string(); base_parts.len() - shared];
+    parts.extend(
+        target_parts[shared..].iter().map(|part| part.as_os_str().to_string_lossy().to_string()),
+    );
+    if parts.is_empty() {
+        ".".to_string()
+    } else {
+        parts.join("/")
+    }
+}
+
 /// Collapse `..` so a path dependency reads clearly in diagnostics.
 fn normalize(path: &Path) -> PathBuf {
     let mut parts: Vec<std::ffi::OsString> = Vec::new();
@@ -520,6 +601,27 @@ pub fn manifest_digest(manifest: &Manifest) -> String {
             dependency.requirement,
             dependency.path.clone().unwrap_or_default(),
             dependency.dev
+        ));
+    }
+    lines.sort();
+    checksum(lines.join("\n").as_bytes())
+}
+
+// korben-mic
+/// The digest a workspace's lock is keyed on: every member's declarations, so
+/// adding a dependency to any member invalidates the lock rather than only the
+/// member that changed.
+pub fn workspace_digest(members: &[&Manifest]) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for manifest in members {
+        // A member's version is part of the digest because a sibling that
+        // depends on it resolves against that version: bumping it has to
+        // invalidate the lock the same way changing a requirement does.
+        lines.push(format!(
+            "{}\u{1f}{}\u{1f}{}",
+            manifest.name,
+            manifest.version,
+            manifest_digest(manifest)
         ));
     }
     lines.sort();
@@ -638,6 +740,9 @@ impl Lockfile {
                     let base = registry.clone().unwrap_or_else(|| PathBuf::from(recorded));
                     base.join(&locked.name).join(locked.version.to_string())
                 }
+                // A member is relative to the workspace root, which is the root
+                // the lockfile sits in.
+                Source::Member(relative) => normalize(&root.join(relative)),
             };
             if !directory.join(crate::project::MANIFEST_NAME).is_file() {
                 return Err(format!(
@@ -647,7 +752,14 @@ impl Lockfile {
                 ));
             }
             let actual = package_checksum(&directory);
-            if verify && actual != locked.checksum {
+            // korben-mic
+            // A checksum pins a dependency so that what is built is what was
+            // reviewed. A workspace member is not that: it is source in this
+            // repository that the author is editing, and every keystroke would
+            // otherwise stop the build demanding `korben update`. Its integrity
+            // is the repository's business, not the lockfile's.
+            let pinned = !matches!(locked.source, Source::Member(_));
+            if verify && pinned && actual != locked.checksum {
                 return Err(format!(
                     "dependency `{}` has changed since it was locked\n  \
                      locked:  {}\n  found:   {}\n  \
@@ -670,6 +782,31 @@ impl Lockfile {
     /// True when the lock still describes this manifest's declarations.
     pub fn matches(&self, manifest: &Manifest) -> bool {
         self.manifest_digest == manifest_digest(manifest)
+    }
+
+    // korben-mic
+    /// A lock for a whole workspace, keyed on every member's declarations.
+    pub fn from_workspace(name: &str, members: &[&Manifest], resolution: &Resolution) -> Lockfile {
+        Lockfile {
+            root: name.to_string(),
+            manifest_digest: workspace_digest(members),
+            packages: resolution
+                .packages
+                .iter()
+                .map(|package| LockedPackage {
+                    name: package.name.clone(),
+                    version: package.version.clone(),
+                    source: package.source.clone(),
+                    checksum: package.checksum.clone(),
+                    dependencies: package.dependencies.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    /// True when the lock still describes every member's declarations.
+    pub fn matches_workspace(&self, members: &[&Manifest]) -> bool {
+        self.manifest_digest == workspace_digest(members)
     }
 }
 
