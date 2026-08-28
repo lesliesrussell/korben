@@ -96,9 +96,28 @@ pub fn lint_session(session: &Session) -> Diagnostics {
     let mut diagnostics = Diagnostics::new();
     for module in &session.modules {
         for item in &module.items {
+            // korben-95f
+            // A macro and a value cannot both answer to one name. Expansion
+            // runs first and a call site cannot tell them apart, so whatever
+            // shares a macro's name is never reached.
             match item {
-                Item::Fn(decl) => lint_fn(decl, &mut diagnostics),
+                Item::Fn(decl) => {
+                    lint_fn(decl, &mut diagnostics);
+                    lint_macro_shadow(session, &decl.name, decl.span, "function", &mut diagnostics);
+                }
+                Item::Foreign(decl) => lint_macro_shadow(
+                    session,
+                    &decl.name,
+                    decl.span,
+                    "foreign function",
+                    &mut diagnostics,
+                ),
+                Item::Const { name, span, .. } => {
+                    lint_macro_shadow(session, name, *span, "constant", &mut diagnostics)
+                }
                 Item::Impl(decl) => {
+                    // A method is reached through a receiver, which expansion
+                    // does not rewrite, so a macro cannot hide one.
                     for method in &decl.methods {
                         lint_fn(method, &mut diagnostics);
                     }
@@ -126,6 +145,29 @@ pub fn lint_session(session: &Session) -> Diagnostics {
         }
     }
     diagnostics
+}
+
+// korben-95f
+/// Report a declaration a macro of the same name makes unreachable.
+///
+/// `duplicate_declarations` has an arm for this, but it never fires: the
+/// expander consumes macro forms before that pass sees the module, and what it
+/// registers lives in the interpreter's macro table instead.
+fn lint_macro_shadow(
+    session: &Session,
+    name: &str,
+    span: Span,
+    kind: &str,
+    diagnostics: &mut Diagnostics,
+) {
+    let Some(entry) = session.interp.macros.get(name) else { return };
+    diagnostics.push(
+        Diagnostic::warning(format!("`{name}` is also a macro, so this {kind} is never called"))
+            .with_code("shadowed-by-macro")
+            .at(span, "a call site expands the macro instead of reaching this")
+            .secondary(entry.decl.span, "the macro with this name")
+            .help("rename one of them, or remove the one that is not wanted"),
+    );
 }
 
 fn lint_fn(decl: &FnDecl, diagnostics: &mut Diagnostics) {

@@ -65,6 +65,13 @@
   about it, the interpreter keeping the later definition where the backend
   refused to compile. Values and types are separate namespaces, so a record
   declaring both a type and a constructor is still fine.
+- `korben lint` reports a function, foreign function, or constant that a macro
+  of the same name makes unreachable. Expansion runs before evaluation and a
+  call site cannot tell a macro from a function, so the macro always won and the
+  declaration under it was dead code that nothing mentioned. Both execution
+  modes agree about which one wins, which is why this is a lint and not an
+  error. `duplicate_declarations` had an arm for the case, but it never fired:
+  the expander consumes macro forms before that pass sees the module.
 - `(def name value)` works. `split_annotation` was a stub that discarded the
   forms after the name, so every top-level `def` failed with "`def` needs a
   value" and an annotation was never read. Nothing in the repository, prelude,
