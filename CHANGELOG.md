@@ -4,6 +4,25 @@
 
 ### Added
 
+- **Concurrent connection handling.** `std.http`'s server owns its listener and
+  every open connection, waits for readiness across all of them at once, and
+  calls the handler only when a whole request has arrived. A handler therefore
+  always runs to completion, and a client that connects and says nothing, or
+  stops halfway through a request, holds up only itself. `serve` keeps its
+  signature and no task suspends.
+- `std.net/pool`, the resource that makes it possible: one value owning a
+  listener and its connections, addressed by id. A Korben collection could not
+  hold them, because a resource-bearing value moves and a connection cannot be
+  taken out of a vector and put back on every pass of a loop. Readiness across
+  several sockets is the one thing the standard library cannot express, so
+  `poll(2)` is declared as an `extern "C"`, the way `ffi.rs` already declares
+  `dlopen` and `dlsym`.
+- A socket operation that would block now runs another ready task before
+  waiting, the way a channel already did. This is worth having on its own, but
+  it is not what made the server concurrent: driving is re-entrant, so the
+  accepting task sat underneath the connection it drove and could not get back
+  to accepting while a silent client held it. That approach was built, measured,
+  and replaced.
 - **The Rust adapter ABI** (specification 17.3), the last of Milestone C.
   `#[korben_export]` marks a function in a Rust library and adds an
   `extern "C"` shim beside it, leaving the function itself ordinary Rust;

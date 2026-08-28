@@ -186,9 +186,11 @@ is a project rather than a file: two packages and a committed lockfile.
 - **HTTP.** `std.http` is written in Korben over `std.net`: requests and
   responses are ordinary records, errors an ordinary enum, and routing is
   ordinary pattern matching. `examples/http.kb` is the specification's section
-  29 reference program. Requests are handled one at a time: the sockets block,
-  and a blocking read stalls the cooperative scheduler, so concurrent handling
-  needs the non-blocking I/O described under *Not yet implemented*.
+  29 reference program. Connections are served concurrently: the server owns its
+  listener and every open connection, waits for readiness across all of them at
+  once, and calls the handler only when a whole request has arrived. A client
+  that connects and says nothing, or stops halfway, holds up only itself, and no
+  task ever suspends — the handler always runs to completion.
 - **C interoperation.** `(ffi/c-library ...)` and `(ffi/c-fn ...)` declare typed
   foreign functions; `korben ffi c <header>` generates them from C prototypes.
   A declaration asserts a contract the compiler cannot verify, so it is an
@@ -321,9 +323,11 @@ Not yet implemented, and reported as such rather than stubbed silently:
   started task cannot suspend. Making tasks run simultaneously means moving the
   value representation from reference counting to atomic sharing, which is a
   deliberate future change rather than an oversight.
-- **A preemptible I/O reactor.** Because a task cannot suspend on a blocking
-  read, the HTTP server handles one request at a time. Concurrency across
-  connections needs non-blocking sockets driven by the scheduler.
+- **Task suspension.** A started task still cannot suspend: its body runs on the
+  native stack, so there is no resumable representation of a partly-finished
+  task. The HTTP server does not need one — it waits for readiness across every
+  socket at once and calls a handler only when a whole request has arrived — but
+  real preemption, and fairness under load, do.
 - **TLS.** `std.http` speaks `http://` only; `https://` needs `std.crypto`.
 - **Lifetime inference.** Ownership tracks moves flow-sensitively and reports
   use-after-move, possible moves across branches, moves inside a loop, cloning a

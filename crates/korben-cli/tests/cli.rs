@@ -1081,3 +1081,97 @@ fn a_file_with_nothing_annotated_says_so() {
         combined(&generated)
     );
 }
+
+// korben-ym2
+/// Send a request on a fresh connection and return the status line.
+fn http_status(port: u16, timeout: std::time::Duration) -> Option<String> {
+    use std::io::{Read, Write};
+    let mut socket = std::net::TcpStream::connect(("127.0.0.1", port)).ok()?;
+    socket.set_read_timeout(Some(timeout)).ok()?;
+    socket.write_all(b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n").ok()?;
+    let mut buffer = [0u8; 128];
+    let count = socket.read(&mut buffer).ok()?;
+    let text = String::from_utf8_lossy(&buffer[..count]).to_string();
+    text.lines().next().map(|line| line.trim().to_string())
+}
+
+// korben-ym2
+#[test]
+fn a_silent_client_does_not_hold_up_the_server() {
+    // The case that decides the design. A client that connects and never sends
+    // used to stop every later client: the accepting task was underneath its
+    // read and could not get back to accepting.
+    let scratch = Scratch::new("httpconcurrent");
+    assert!(korben(scratch.path(), &["new", "server", "--template", "service"]).status.success());
+    let project = scratch.path().join("server");
+    let port = free_port();
+    std::fs::write(
+        project.join("src/main.kb"),
+        format!(
+            r#"(module main
+  (use std.http :as http))
+
+(fn handle [request: http.Request] -> http.Response
+  (http.text 200 "ok"))
+
+(pub fn main [] -> Unit !io
+  (match (http.serve "127.0.0.1:{port}" handle)
+    (Ok _) nil
+    (Err error) (println "server stopped:" (http.describe error))))
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::remove_file(project.join("tests/main_test.kb")).unwrap();
+
+    let mut server = Command::new(EXE)
+        .arg("run")
+        .current_dir(&project)
+        .env("NO_COLOR", "1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("start the server");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(std::time::Instant::now() < deadline, "the server never bound {port}");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    let short = std::time::Duration::from_secs(5);
+    let first = http_status(port, short);
+
+    // Hold a connection open and say nothing on it, ever.
+    let silent = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect silently");
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let during_silence = http_status(port, short);
+
+    // And one that sends a request it never finishes.
+    let mut partial = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect partially");
+    {
+        use std::io::Write;
+        partial
+            .write_all(b"POST /x HTTP/1.1\r\nContent-Length: 100\r\n\r\nhalf")
+            .expect("send half a request");
+    }
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let during_partial = http_status(port, short);
+
+    let _ = server.kill();
+    let _ = server.wait();
+    drop(silent);
+    drop(partial);
+
+    assert_eq!(first.as_deref(), Some("HTTP/1.1 200 OK"), "the server answered nothing at all");
+    assert_eq!(
+        during_silence.as_deref(),
+        Some("HTTP/1.1 200 OK"),
+        "a client that says nothing held up the server"
+    );
+    assert_eq!(
+        during_partial.as_deref(),
+        Some("HTTP/1.1 200 OK"),
+        "a half-sent request held up the server"
+    );
+}

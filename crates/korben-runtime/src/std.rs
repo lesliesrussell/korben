@@ -237,6 +237,16 @@ pub const NAMES: &[&str] = &[
     // std.net: blocking TCP
     "std.net/listen",
     "std.net/connect",
+    // korben-ae2
+    "std.net/pool",
+    "Pool/wait",
+    "Pool/read",
+    "Pool/write",
+    "Pool/close-connection",
+    "Pool/address",
+    "Pool/close",
+    "Pool/closed?",
+    "Pool/drop",
     "Listener/accept",
     "Listener/address",
     "Listener/close",
@@ -949,6 +959,34 @@ pub fn builtin(name: &str) -> Option<Value> {
         "std.net/connect" => native("connect", 1, |_, args, loc| {
             crate::net::connect(&as_string("net.connect", &args[0], loc)?)
         }),
+        // korben-ae2
+        "std.net/pool" => native("pool", 1, |_, args, loc| {
+            let address = as_string("net.pool", &args[0], loc)?;
+            crate::net::pool(&address)
+        }),
+        "Pool/wait" => native("wait", 2, |_, args, loc| {
+            let timeout = as_int("Pool.wait", &args[1], loc)?;
+            crate::net::pool_wait(&args[0], timeout, loc)
+        }),
+        "Pool/read" => native("read", 2, |_, args, loc| {
+            let id = as_int("Pool.read", &args[1], loc)?;
+            crate::net::pool_read(&args[0], id, loc)
+        }),
+        "Pool/write" => native("write", 3, |_, args, loc| {
+            let id = as_int("Pool.write", &args[1], loc)?;
+            let text = as_string("Pool.write", &args[2], loc)?;
+            crate::net::pool_write(&args[0], id, &text, loc)
+        }),
+        "Pool/close-connection" => native("close-connection", 2, |_, args, loc| {
+            let id = as_int("Pool.close-connection", &args[1], loc)?;
+            crate::net::pool_drop(&args[0], id, loc)
+        }),
+        "Pool/address" => {
+            native("address", 1, |_, args, loc| crate::net::pool_address(&args[0], loc))
+        }
+        "Pool/close" | "Pool/drop" => {
+            native("close", 1, |_, args, loc| crate::net::pool_close(&args[0], loc))
+        }
         // korben-48e
         "Listener/accept" => {
             native("accept", 1, |caller, args, loc| crate::net::accept(caller, &args[0], loc))
@@ -1095,6 +1133,8 @@ pub fn method_of(type_name: &str, method: &str) -> Option<Value> {
         "File" => "File",
         "Listener" => "Listener",
         "Connection" => "Connection",
+        // korben-ae2
+        "Pool" => "Pool",
         "Scope" => "Scope",
         "Task" => "Task",
         "Sender" => "Sender",
@@ -1105,7 +1145,7 @@ pub fn method_of(type_name: &str, method: &str) -> Option<Value> {
 }
 
 /// Native types that own an external resource and must be released.
-pub const RESOURCE_TYPES: &[&str] = &["File", "Listener", "Connection"];
+pub const RESOURCE_TYPES: &[&str] = &["File", "Listener", "Connection", "Pool"];
 
 type FileHandle = RefCell<Option<std::fs::File>>;
 
