@@ -7,6 +7,7 @@ members = [
     "crates/korben-lsp",
     "crates/korben-cli",
     "crates/korben-export",
+    "crates/korben-export-macro",
 ]
 
 [workspace.package]
@@ -21,6 +22,7 @@ korben-runtime = { path = "crates/korben-runtime" }
 korben-core = { path = "crates/korben-core" }
 korben-lsp = { path = "crates/korben-lsp" }
 korben-export = { path = "crates/korben-export" }
+korben-export-macro = { path = "crates/korben-export-macro" }
 
 [profile.release]
 opt-level = 3

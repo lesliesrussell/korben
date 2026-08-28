@@ -23,6 +23,13 @@ dependencies = [
 [[package]]
 name = "korben-export"
 version = "0.7.0"
+dependencies = [
+ "korben-export-macro",
+]
+
+[[package]]
+name = "korben-export-macro"
+version = "0.7.0"
 
 [[package]]
 name = "korben-lsp"
