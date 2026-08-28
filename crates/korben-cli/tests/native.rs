@@ -425,3 +425,99 @@ fn top_level_constants_agree_between_execution_modes() {
 "#,
     );
 }
+
+// korben-8cg
+/// Targets rustup reports as installed, or none when rustup is absent.
+fn installed_targets() -> Vec<String> {
+    let Ok(output) = Command::new("rustup").args(["target", "list", "--installed"]).output() else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout).lines().map(|line| line.trim().to_string()).collect()
+}
+
+// korben-8cg
+#[test]
+fn an_unknown_target_is_rejected_with_a_suggestion() {
+    let scratch = Scratch::new("badtarget");
+    assert!(korben(scratch.path(), &["new", "app"]).status.success());
+    let project = scratch.path().join("app");
+
+    let built = korben(&project, &["build", "--target", "x86_64-unknown-linux-gnuu"]);
+    assert!(!built.status.success());
+    let text = combined(&built);
+    assert!(text.contains("is not a target rustc knows"), "{text}");
+    assert!(text.contains("Did you mean `x86_64-unknown-linux-gnu`?"), "{text}");
+}
+
+// korben-8cg
+#[test]
+fn a_target_without_a_standard_library_names_the_command_that_installs_it() {
+    let installed = installed_targets();
+    if installed.is_empty() {
+        eprintln!("skipping: no rustup to ask about installed targets");
+        return;
+    }
+    // A real triple nobody is likely to have installed, and which this machine
+    // demonstrably does not have.
+    let candidates =
+        ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-musl", "i686-pc-windows-msvc"];
+    let Some(missing) = candidates.iter().find(|triple| !installed.contains(&triple.to_string()))
+    else {
+        eprintln!("skipping: every candidate target is installed here");
+        return;
+    };
+
+    let scratch = Scratch::new("notarget");
+    assert!(korben(scratch.path(), &["new", "app"]).status.success());
+    let project = scratch.path().join("app");
+
+    let built = korben(&project, &["build", "--target", missing]);
+    assert!(!built.status.success());
+    let text = combined(&built);
+    assert!(text.contains("is not installed"), "{text}");
+    assert!(text.contains(&format!("rustup target add {missing}")), "{text}");
+}
+
+// korben-8cg
+#[test]
+fn a_cross_build_lands_under_its_triple() {
+    if !cargo_available() {
+        eprintln!("skipping: no cargo on PATH");
+        return;
+    }
+    let installed = installed_targets();
+    // The host triple is always buildable, and naming it explicitly exercises
+    // every part of the path a genuine cross build takes.
+    let host = match String::from_utf8(
+        Command::new("rustc").arg("-vV").output().expect("run rustc").stdout,
+    ) {
+        Ok(text) => text
+            .lines()
+            .find_map(|line| line.strip_prefix("host: "))
+            .map(|triple| triple.trim().to_string()),
+        Err(_) => None,
+    };
+    let Some(host) = host else {
+        eprintln!("skipping: cannot determine the host triple");
+        return;
+    };
+    if !installed.is_empty() && !installed.contains(&host) {
+        eprintln!("skipping: the host target is not installed");
+        return;
+    }
+
+    let scratch = Scratch::new("crossbuild");
+    assert!(korben(scratch.path(), &["new", "app"]).status.success());
+    let project = scratch.path().join("app");
+
+    let built = korben(&project, &["build", "--target", &host]);
+    assert!(built.status.success(), "{}", combined(&built));
+    assert!(stdout(&built).contains(&host), "{}", stdout(&built));
+    let artifact = project.join("target").join(&host).join("debug").join("app");
+    assert!(artifact.exists(), "no artifact at {}", artifact.display());
+    // The default build keeps its own place, so the two do not collide.
+    assert!(!project.join("target/debug/app").exists());
+}
