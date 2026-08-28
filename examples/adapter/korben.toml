@@ -1,0 +1,20 @@
+[package]
+name = "adapter"
+version = "0.1.0"
+edition = "2026"
+description = "Calling a Rust library from Korben through the adapter ABI"
+license = "MIT"
+main = "main"
+
+[dependencies]
+
+[dev-dependencies]
+
+[build]
+target = "native"
+opt-level = 2
+
+# The Rust half of this package. `korben ffi` reports what a project declares
+# here; `korben ffi rust src/lib.rs` writes the bindings for it.
+[ffi]
+rust = ["slug"]

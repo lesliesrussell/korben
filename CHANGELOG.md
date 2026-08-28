@@ -4,6 +4,22 @@
 
 ### Added
 
+- **The Rust adapter ABI** (specification 17.3), the last of Milestone C.
+  `#[korben_export]` marks a function in a Rust library and adds an
+  `extern "C"` shim beside it, leaving the function itself ordinary Rust;
+  `korben ffi rust <file.rs>` writes the Korben half, with the `raw-`
+  declarations that are the foreign contract and a safe wrapper over each. Both
+  halves are rendered from one reading of the signature, in the new
+  `korben-adapter` crate, so they cannot disagree about a type, a symbol name,
+  or a rejection. The boundary carries `i64`, `f64`, `bool`, `&str`, and
+  `String`, plus `Result<T, E>` for any printable `E`; anything else is
+  declined by name. Failure and panic share one channel, and a panic is caught
+  before it crosses, because the release profile aborts on panic and an unwind
+  across `extern "C"` is undefined behaviour. `examples/adapter/` is one
+  library with both halves in it, and a differential test requires the two
+  execution modes to produce identical output through it.
+  `#[korben_export]` needs `proc_macro`, which the compiler ships, so the
+  toolchain still has no dependency outside the standard library.
 - **Cross compilation.** `korben build --target <triple>` passes the triple
   through to the cargo build the backend already drives, and the artifact lands
   in `target/<triple>/<profile>/` with the extension the triple implies. The

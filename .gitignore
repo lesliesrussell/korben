@@ -1,5 +1,6 @@
 /target
 /crates/*/target
+/examples/*/target
 **/*.rs.bk
 .DS_Store
 .omc/state/

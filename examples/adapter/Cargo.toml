@@ -1,0 +1,14 @@
+[package]
+name = "slug"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone, so the surrounding cargo workspace does not absorb it.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+korben-export = { path = "../../crates/korben-export" }

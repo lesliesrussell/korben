@@ -1,0 +1,41 @@
+;;; Calling a Rust library from Korben, through the adapter ABI.
+;;;
+;;; `src/lib.rs` is ordinary Rust. `#[korben_export]` adds an `extern "C"` shim
+;;; beside each annotated function, and `korben ffi rust` writes `slug.kb` from
+;;; the same signatures, so the two halves cannot disagree.
+;;;
+;;; Build and run it from this directory:
+;;;
+;;;   cargo build                                     # the Rust half
+;;;   korben ffi rust src/lib.rs --library slug \
+;;;     --module slug --out src/slug.kb               # the Korben half
+;;;   DYLD_LIBRARY_PATH=target/debug korben run       # macOS
+;;;   LD_LIBRARY_PATH=target/debug korben run         # Linux
+(module main
+  (use slug))
+
+;;; Every wrapper is fallible, because the boundary can fail where the Rust
+;;; function cannot: it may have panicked, or returned a string C cannot carry.
+(fn report [label: String outcome: Result String String] -> Unit !io
+  (match outcome
+    (Ok value) (println (format "{label}: {value}"))
+    (Err message) (println (format "{label} failed: {message}"))))
+
+(pub fn main [] -> Unit !io !ffi !unsafe
+  (report "slugify" (slug.slugify "Korben Is Fast"))
+  (report "truncate" (slug.truncate "a long enough line to cut" 12))
+
+  ; An error raised in Rust arrives as an `Err` carrying its message.
+  (report "truncate" (slug.truncate "anything" 0))
+
+  (match (slug.word-count "one two three")
+    (Ok count) (println (format "word-count: {count}"))
+    (Err message) (println (format "word-count failed: {message}")))
+
+  (match (slug.ratio 22.0 7.0)
+    (Ok value) (println (format "ratio: {value}"))
+    (Err message) (println (format "ratio failed: {message}")))
+
+  (match (slug.ratio 1.0 0.0)
+    (Ok value) (println (format "ratio: {value}"))
+    (Err message) (println (format "ratio failed: {message}"))))
