@@ -59,6 +59,8 @@ pub struct Session {
     loading: Vec<String>,
     /// Modules already reported as missing, so one bad import is one error.
     missing: HashSet<String>,
+    /// Unsaved editor buffers, keyed by path, read in place of the file.
+    overlay: HashMap<PathBuf, String>,
 }
 
 impl Session {
@@ -79,6 +81,7 @@ impl Session {
             loaded: HashSet::new(),
             loading: Vec::new(),
             missing: HashSet::new(),
+            overlay: HashMap::new(),
         };
         session.load_prelude();
         session
@@ -105,6 +108,7 @@ impl Session {
             loaded: HashSet::new(),
             loading: Vec::new(),
             missing: HashSet::new(),
+            overlay: HashMap::new(),
         };
         session.load_prelude();
         session.prepare_dependencies()?;
@@ -255,15 +259,22 @@ impl Session {
     /// Read, expand, lower, and register a single source file. A `.kbx` build
     /// artifact is unpacked into the modules it contains.
     pub fn load_file(&mut self, path: &Path, module_name: Option<String>) -> Loaded {
-        let text = match std::fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(error) => {
-                self.diagnostics.push(
-                    Diagnostic::error(format!("cannot read {}: {error}", path.display()))
-                        .with_code("io"),
-                );
-                return Err(());
-            }
+        // korben-efd
+        // An editor's unsaved buffer is the truth about that file. Checking it
+        // here means every path into the loader sees the same text, including
+        // an import that reaches a file the editor happens to have open.
+        let text = match self.overlay.get(path) {
+            Some(text) => text.clone(),
+            None => match std::fs::read_to_string(path) {
+                Ok(text) => text,
+                Err(error) => {
+                    self.diagnostics.push(
+                        Diagnostic::error(format!("cannot read {}: {error}", path.display()))
+                            .with_code("io"),
+                    );
+                    return Err(());
+                }
+            },
         };
         if crate::bundle::is_bundle(&text) {
             return self.load_bundle(path, &text);
@@ -271,6 +282,17 @@ impl Session {
         let file = self.sources.add_file(path, text.clone());
         let default_name = module_name.clone().unwrap_or_else(|| default_module_name(path));
         self.load_source(file, &text, default_name, module_name)
+    }
+
+    // korben-efd
+    /// Read `path` from `text` rather than from disk, for an unsaved buffer.
+    pub fn set_overlay(&mut self, path: PathBuf, text: String) {
+        self.overlay.insert(path, text);
+    }
+
+    /// Go back to reading `path` from disk.
+    pub fn clear_overlay(&mut self, path: &Path) {
+        self.overlay.remove(path);
     }
 
     /// Load source text that is already in the source map.

@@ -4,6 +4,18 @@
 
 ### Added
 
+- **A language server.** `korben lsp` speaks the Language Server Protocol over
+  stdin and stdout: workspace diagnostics, hover, go to definition, completion,
+  document symbols, and formatting. It has no dependency outside the toolchain
+  -- the JSON-RPC codec and the protocol's UTF-16 position arithmetic are part
+  of the new `korben-lsp` crate.
+- Diagnostics read the editor's unsaved buffer rather than the file on disk, so
+  an error appears while the code is being written rather than after it is
+  saved. A file that becomes clean has its diagnostics cleared.
+- Hover reports the type inference actually settled on, for locals as well as
+  declarations. `korben_core::infer::chart_session` records a type per
+  expression during the same pass `check_session` runs, so the editor and the
+  command line cannot give different answers.
 - `examples/packages/`, a two-package project with a committed `korben.lock`.
   Acceptance criterion 10 was the only one with no runnable example: the lock
   is verified reproducible by a test that regenerates it and compares bytes,

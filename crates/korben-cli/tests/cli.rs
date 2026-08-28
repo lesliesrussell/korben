@@ -69,9 +69,37 @@ fn unknown_commands_fail_with_guidance() {
 #[test]
 fn planned_commands_say_which_milestone_they_land_in() {
     let scratch = Scratch::new("planned");
-    let output = korben(scratch.path(), &["lsp"]);
+    let output = korben(scratch.path(), &["publish"]);
     assert!(!output.status.success());
     assert!(combined(&output).contains("Milestone"));
+}
+
+// korben-efd
+#[test]
+fn the_language_server_speaks_the_protocol_on_stdin_and_stdout() {
+    let scratch = Scratch::new("lsp");
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
+    let exit = r#"{"jsonrpc":"2.0","method":"exit"}"#;
+    let input = format!(
+        "Content-Length: {}\r\n\r\n{body}Content-Length: {}\r\n\r\n{exit}",
+        body.len(),
+        exit.len()
+    );
+    let mut child = Command::new(EXE)
+        .arg("lsp")
+        .current_dir(scratch.path())
+        .env("NO_COLOR", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn the language server");
+    use std::io::Write;
+    child.stdin.take().expect("stdin").write_all(input.as_bytes()).expect("write");
+    let output = child.wait_with_output().expect("wait");
+    assert!(output.status.success(), "{}", combined(&output));
+    let text = stdout(&output);
+    assert!(text.starts_with("Content-Length: "), "unframed output: {text}");
+    assert!(text.contains("\"hoverProvider\":true"), "{text}");
 }
 
 #[test]

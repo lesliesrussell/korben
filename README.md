@@ -41,6 +41,7 @@ One executable covers the standard workflow. Every command works on a project
 | `korben audit` | Verify the lockfile, checksums, and package metadata |
 | `korben doctor` | Toolchain and project health |
 | `korben build [--release] [--emit ir\|rust]` | Compile to a native executable |
+| `korben lsp` | Language server, over stdin and stdout |
 
 Diagnostics carry a concise explanation, source spans, expected-versus-found
 types in source-level names, and confidence-safe suggestions. `--json` emits the
@@ -179,6 +180,14 @@ is a project rather than a file: two packages and a committed lockfile.
 - **Structured concurrency.** `async fn`, `await`, `task-scope`, `spawn`,
   `join-all`, cooperative cancellation, and typed bounded or unbounded
   channels. `await` outside asynchronous code is a compile error.
+- **Editor support.** `korben lsp` speaks the Language Server Protocol over
+  stdin and stdout, with no dependency beyond the toolchain itself. Diagnostics
+  republish as you type and read from the unsaved buffer, not the file on disk.
+  Hover shows a declaration's signature and documentation, or the type inference
+  gave a local -- from the same inference `korben check` runs, so the editor and
+  the command line cannot disagree. Go to definition, completion (module members
+  after an alias, declarations and builtins elsewhere), document symbols, and
+  formatting through the canonical formatter round it out.
 - Standard library: `std.core`, `std.string`, `std.math`, `std.io`, `std.fs`,
   `std.json`, `std.log`, `std.time`, `std.process`, `std.test`, `std.syntax`,
   `std.net`, `std.http`, `std.async`.
@@ -265,9 +274,11 @@ Implemented:
   shared by both execution modes.
 - Dependency resolution, a pinned lockfile with SHA-256 checksums, and
   reproducible builds over path and local-registry sources.
+- A language server: diagnostics, hover, go to definition, completion, document
+  symbols, and formatting.
 - Canonical formatter, linter, documentation generator, project-aware REPL.
 - `new`, `init`, `run`, `dev`, `check`, `test`, `fmt`, `lint`, `repl`, `expand`,
-  `doc`, `inspect`, `doctor`, `build`.
+  `doc`, `inspect`, `doctor`, `build`, `lsp`.
 
 Not yet implemented, and reported as such rather than stubbed silently:
 
@@ -300,8 +311,13 @@ Not yet implemented, and reported as such rather than stubbed silently:
   `<registry>/<name>/<version>/`. `korben publish` and `korben install` report
   the milestone they land in. Package signing, git dependencies, workspaces, and
   sandboxed build scripts are not implemented.
-- **Language server** (Milestone B). `korben lsp` reports the milestone it lands
-  in; the JSON diagnostics and `api.json` it will build on already exist.
+- **The rest of the language server** (specification 20.4). What is implemented
+  is listed above. Rename with macro-hygiene awareness, find references, code
+  actions, signature help, semantic tokens, and inlay hints are not, and the
+  server declines those requests rather than answering them badly. Document sync
+  is whole-file: every keystroke re-checks the workspace, which is fast enough
+  at the sizes Korben projects reach today and is the obvious thing to make
+  incremental first.
 - **Restart-case conditions.** Typed conditions and handlers work; named restart
   points do not.
 
@@ -342,7 +358,7 @@ is ready. All ten hold today:
 | 10 | Reproduce the build from a lockfile without install scripts | `examples/packages/`, `korben audit` |
 
 What that does *not* mean is that the specification is finished: parallelism, a
-package registry, TLS, and the language server are all still ahead.
+package registry, and TLS are all still ahead.
 
 ## Repository layout
 
@@ -353,6 +369,7 @@ crates/
                    interpreter and by generated native code
   korben-core/     lowering, macro expansion, types, inference, evaluator,
                    core IR, the native backend, project loading, docs
+  korben-lsp/      the language server: JSON-RPC, positions, editor queries
   korben-cli/      the `korben` executable
 examples/          runnable programs, covered by the test suite;
                    `packages/` is a two-package project with a committed lock

@@ -39,6 +39,35 @@ pub fn check_session(session: &mut Session, strict_api: bool) {
     }
 }
 
+// korben-efd
+/// Every expression's inferred type, keyed by span, for editor hover.
+///
+/// This runs the same inference `check_session` does; it differs only in
+/// recording what it concludes along the way, so a hover reports the type the
+/// checker actually used rather than a second opinion computed another way.
+pub fn chart_session(session: &Session) -> Vec<(Span, String)> {
+    let mut checker = Checker::new(false);
+    checker.namespace = crate::scope::Namespace::build(&session.modules);
+    checker.chart = Some(Vec::new());
+    for module in &session.modules {
+        checker.collect_types(module);
+    }
+    for module in &session.modules {
+        checker.collect_signatures(module);
+    }
+    for module in &session.modules {
+        checker.check_module(module);
+    }
+    let charted = checker.chart.take().unwrap_or_default();
+    charted
+        .into_iter()
+        .map(|(span, ty)| {
+            let resolved = checker.resolve(&ty);
+            (span, resolved.to_string())
+        })
+        .collect()
+}
+
 /// Infer the type of a single expression against the session's declarations.
 /// Used by the REPL's `:type` command and by editor hover.
 pub fn type_of(session: &Session, expr: &Expr) -> String {
@@ -177,6 +206,8 @@ struct Checker {
     namespace: crate::scope::Namespace,
     /// The module being checked.
     module: String,
+    /// Every expression's inferred type, recorded only when an editor asks.
+    chart: Option<Vec<(Span, Type)>>,
 }
 
 impl Checker {
@@ -196,6 +227,7 @@ impl Checker {
             known_types: builtin_type_names(),
             namespace: crate::scope::Namespace::default(),
             module: String::new(),
+            chart: None,
         };
         checker.install_builtin_enums();
         checker.install_prelude_signatures();
@@ -989,7 +1021,22 @@ impl Checker {
         result
     }
 
+    // korben-efd
+    /// Infer `expr`, recording its type when a hover map has been asked for.
     fn infer(&mut self, expr: &Expr, scope: &mut Scope) -> Type {
+        let ty = self.infer_uncharted(expr, scope);
+        if self.chart.is_some() {
+            // Pruned here rather than at the query, so the type recorded is the
+            // one inference had settled on at this point in the walk.
+            let resolved = self.resolve(&ty);
+            if let Some(chart) = &mut self.chart {
+                chart.push((expr.span(), resolved));
+            }
+        }
+        ty
+    }
+
+    fn infer_uncharted(&mut self, expr: &Expr, scope: &mut Scope) -> Type {
         match expr {
             Expr::Nil(_) => Type::unit(),
             Expr::Bool(_, _) => Type::bool(),

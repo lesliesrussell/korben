@@ -50,6 +50,7 @@ pub fn run(args: &[String]) -> ExitCode {
         "remove" => cmd_remove(rest),
         "update" => cmd_update(rest),
         "audit" => cmd_audit(rest),
+        "lsp" => cmd_lsp(),
         other => {
             if let Some(milestone) = planned_command(other) {
                 eprintln!(
@@ -71,7 +72,6 @@ fn planned_command(name: &str) -> Option<&'static str> {
     Some(match name {
         "publish" | "install" => "Milestone D (a package registry)",
         "bench" => "Milestone D (benchmark harness)",
-        "lsp" => "Milestone B (language server)",
         _ => return None,
     })
 }
@@ -102,10 +102,26 @@ fn print_help() {
     println!("  doc [--out <dir>]                         generate documentation");
     println!("  inspect                                   show the resolved project model");
     println!("  ffi [c <header>]                          list or generate foreign bindings");
-    println!("  build [--release] [--emit ir|rust]        compile to a native executable\n");
+    println!("  build [--release] [--emit ir|rust]        compile to a native executable");
+    println!("  lsp                                       language server, on stdin and stdout\n");
     println!("{}", ui::bold("OTHER"));
     println!("  version                                   print the toolchain version");
     println!("  help                                      print this message");
+}
+
+// korben-efd
+// -------------------------------------------------------------------- lsp
+
+fn cmd_lsp() -> ExitCode {
+    // The protocol owns stdout, so nothing else may print to it. A failure has
+    // to go to stderr, where an editor's log will show it.
+    match korben_lsp::serve() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{} {error}", ui::red("lsp:"));
+            ExitCode::FAILURE
+        }
+    }
 }
 
 // ------------------------------------------------------------------ new/init

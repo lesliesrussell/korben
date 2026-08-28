@@ -4,6 +4,7 @@ members = [
     "crates/korben-syntax",
     "crates/korben-runtime",
     "crates/korben-core",
+    "crates/korben-lsp",
     "crates/korben-cli",
 ]
 
@@ -17,6 +18,7 @@ repository = "https://github.com/leslierussell/korben"
 korben-syntax = { path = "crates/korben-syntax" }
 korben-runtime = { path = "crates/korben-runtime" }
 korben-core = { path = "crates/korben-core" }
+korben-lsp = { path = "crates/korben-lsp" }
 
 [profile.release]
 opt-level = 3

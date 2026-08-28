@@ -7,6 +7,7 @@ name = "korben-cli"
 version = "0.7.0"
 dependencies = [
  "korben-core",
+ "korben-lsp",
  "korben-runtime",
  "korben-syntax",
 ]
@@ -15,6 +16,15 @@ dependencies = [
 name = "korben-core"
 version = "0.7.0"
 dependencies = [
+ "korben-runtime",
+ "korben-syntax",
+]
+
+[[package]]
+name = "korben-lsp"
+version = "0.7.0"
+dependencies = [
+ "korben-core",
  "korben-runtime",
  "korben-syntax",
 ]

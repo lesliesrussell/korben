@@ -1,16 +1,11 @@
 [package]
-name = "korben-cli"
+name = "korben-lsp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The korben command-line toolchain"
-
-[[bin]]
-name = "korben"
-path = "src/main.rs"
+description = "The Korben language server"
 
 [dependencies]
 korben-syntax.workspace = true
 korben-core.workspace = true
-korben-lsp.workspace = true
 korben-runtime.workspace = true
