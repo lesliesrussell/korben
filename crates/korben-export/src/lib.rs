@@ -25,6 +25,9 @@
 
 // korben-4ka
 
+// korben-10s
+pub use korben_export_macro::korben_export;
+
 use std::any::Any;
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};

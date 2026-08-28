@@ -1,0 +1,10 @@
+[package]
+name = "korben-export-macro"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The #[korben_export] attribute for the Korben adapter ABI."
+
+[lib]
+proc-macro = true
