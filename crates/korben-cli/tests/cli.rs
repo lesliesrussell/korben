@@ -1175,3 +1175,137 @@ fn a_silent_client_does_not_hold_up_the_server() {
         "a half-sent request held up the server"
     );
 }
+
+// korben-c6k
+#[test]
+fn a_request_that_never_ends_is_refused_rather_than_buffered() {
+    use std::io::{Read, Write};
+    let scratch = Scratch::new("httptoolarge");
+    assert!(korben(scratch.path(), &["new", "server", "--template", "service"]).status.success());
+    let project = scratch.path().join("server");
+    let port = free_port();
+    std::fs::write(
+        project.join("src/main.kb"),
+        format!(
+            r#"(module main
+  (use std.http :as http))
+
+(fn handle [request: http.Request] -> http.Response
+  (http.text 200 "ok"))
+
+(pub fn main [] -> Unit !io
+  (match (http.serve "127.0.0.1:{port}" handle)
+    (Ok _) nil
+    (Err error) (println "server stopped:" (http.describe error))))
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::remove_file(project.join("tests/main_test.kb")).unwrap();
+
+    let mut server = Command::new(EXE)
+        .arg("run")
+        .current_dir(&project)
+        .env("NO_COLOR", "1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("start the server");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(std::time::Instant::now() < deadline, "the server never bound {port}");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    // Promise a body far larger than the cap, then send past the cap without
+    // ever finishing it.
+    let mut greedy = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    greedy.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+    greedy
+        .write_all(b"POST /x HTTP/1.1\r\nHost: x\r\nContent-Length: 400000\r\n\r\n")
+        .expect("send the head");
+    let chunk = vec![b'x'; 8192];
+    for _ in 0..16 {
+        // The server answers and hangs up once the cap is passed, so a write
+        // failing here is the expected end of this loop, not a test failure.
+        if greedy.write_all(&chunk).is_err() {
+            break;
+        }
+    }
+    let mut buffer = [0u8; 64];
+    let status = match greedy.read(&mut buffer) {
+        Ok(count) if count > 0 => String::from_utf8_lossy(&buffer[..count])
+            .lines()
+            .next()
+            .map(|line| line.trim().to_string()),
+        _ => None,
+    };
+
+    let _ = server.kill();
+    let _ = server.wait();
+    assert_eq!(
+        status.as_deref(),
+        Some("HTTP/1.1 413 Request Too Large"),
+        "the server buffered a request that never ends"
+    );
+}
+
+// korben-c6k
+#[test]
+fn a_connection_that_does_nothing_is_evicted() {
+    let scratch = Scratch::new("httpevict");
+    assert!(korben(scratch.path(), &["new", "watcher"]).status.success());
+    let project = scratch.path().join("watcher");
+    let port = free_port();
+    // The pool is what knows a silent connection exists, so the eviction it
+    // offers is tested directly rather than through the server's own timeout.
+    std::fs::write(
+        project.join("src/main.kb"),
+        format!(
+            r#"(module main
+  (use std.net :as net)
+  (use std.time :as time))
+
+(pub fn main [] -> Unit !io
+  (match (net.pool "127.0.0.1:{port}")
+    (Err _) (println "no pool")
+    (Ok opened)
+      (with server opened
+        ;; Accept whatever has arrived; a silent connection is registered here
+        ;; but never reported as ready.
+        (match (server.wait 3000)
+          (Err _) nil
+          (Ok _) nil)
+        (time.sleep-millis 200)
+        (match (server.evict 100)
+          (Err _) (println "evict failed")
+          (Ok dropped) (println (len dropped))))))
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::remove_file(project.join("tests/main_test.kb")).unwrap();
+
+    let server = Command::new(EXE)
+        .arg("run")
+        .current_dir(&project)
+        .env("NO_COLOR", "1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("start the program");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let silent = loop {
+        if let Ok(socket) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+            break socket;
+        }
+        assert!(std::time::Instant::now() < deadline, "never bound {port}");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+
+    let output = server.wait_with_output().expect("wait for the program");
+    drop(silent);
+    let text = String::from_utf8_lossy(&output.stdout).to_string();
+    assert_eq!(text.trim(), "1", "expected one connection to be evicted:\n{text}");
+}

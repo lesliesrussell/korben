@@ -343,9 +343,23 @@ fn readable(_fds: &[std::os::raw::c_int], _timeout_ms: i32) -> std::io::Result<V
 /// Korben, where the rest of `std.http` is.
 pub struct Pool {
     listener: TcpListener,
-    connections: Vec<(i64, TcpStream)>,
+    connections: Vec<Connected>,
     next: i64,
 }
+
+// korben-c6k
+/// One accepted connection, and when it last did anything.
+struct Connected {
+    id: i64,
+    stream: TcpStream,
+    active: std::time::Instant,
+}
+
+// korben-c6k
+/// A response is small, and a peer that has not taken one in this long is not
+/// going to. Without a bound here one stuck reader holds the whole server,
+/// because the write is deliberately the one blocking call in the loop.
+const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 type PoolHandle = RefCell<Option<Pool>>;
 
@@ -389,7 +403,7 @@ pub fn pool_wait(value: &Value, timeout_ms: i64, loc: Loc) -> Outcome {
     let mut descriptors = {
         use std::os::unix::io::AsRawFd;
         let mut descriptors = vec![pool.listener.as_raw_fd()];
-        descriptors.extend(pool.connections.iter().map(|(_, stream)| stream.as_raw_fd()));
+        descriptors.extend(pool.connections.iter().map(|open| open.stream.as_raw_fd()));
         descriptors
     };
     #[cfg(not(unix))]
@@ -409,7 +423,11 @@ pub fn pool_wait(value: &Value, timeout_ms: i64, loc: Loc) -> Outcome {
                     let _ = stream.set_nonblocking(true);
                     let id = pool.next;
                     pool.next += 1;
-                    pool.connections.push((id, stream));
+                    pool.connections.push(Connected {
+                        id,
+                        stream,
+                        active: std::time::Instant::now(),
+                    });
                 }
                 Err(error) if error.kind() == ErrorKind::Interrupted => {}
                 Err(_) => break,
@@ -424,7 +442,7 @@ pub fn pool_wait(value: &Value, timeout_ms: i64, loc: Loc) -> Outcome {
         .iter()
         .zip(ready.iter().skip(1))
         .filter(|(_, readable)| **readable)
-        .map(|((id, _), _)| Value::Int(*id))
+        .map(|(open, _)| Value::Int(open.id))
         .collect();
     Ok(Value::ok(Value::vector(ids)))
 }
@@ -438,11 +456,15 @@ pub fn pool_read(value: &Value, id: i64, loc: Loc) -> Outcome {
     };
     let mut borrowed = handle.borrow_mut();
     let Some(pool) = borrowed.as_mut() else { return Ok(closed("this pool")) };
-    let Some((_, stream)) = pool.connections.iter_mut().find(|(each, _)| *each == id) else {
+    let Some(open) = pool.connections.iter_mut().find(|open| open.id == id) else {
         return Ok(closed("this connection"));
     };
+    // korben-c6k
+    // Reading is activity, whether or not it completes a request: a client
+    // sending a large body slowly is making progress, not stalling.
+    open.active = std::time::Instant::now();
     let mut buffer = vec![0u8; READ_CHUNK];
-    match stream.read(&mut buffer) {
+    match open.stream.read(&mut buffer) {
         Ok(0) => Ok(Value::ok(Value::none())),
         Ok(count) => {
             buffer.truncate(count);
@@ -465,15 +487,17 @@ pub fn pool_write(value: &Value, id: i64, text: &str, loc: Loc) -> Outcome {
     };
     let mut borrowed = handle.borrow_mut();
     let Some(pool) = borrowed.as_mut() else { return Ok(closed("this pool")) };
-    let Some((_, stream)) = pool.connections.iter_mut().find(|(each, _)| *each == id) else {
+    let Some(open) = pool.connections.iter_mut().find(|open| open.id == id) else {
         return Ok(closed("this connection"));
     };
-    let _ = stream.set_nonblocking(false);
-    let outcome = match stream.write_all(text.as_bytes()).and_then(|()| stream.flush()) {
+    let _ = open.stream.set_nonblocking(false);
+    // korben-c6k
+    let _ = open.stream.set_write_timeout(Some(WRITE_TIMEOUT));
+    let outcome = match open.stream.write_all(text.as_bytes()).and_then(|()| open.stream.flush()) {
         Ok(()) => Value::ok(Value::Nil),
         Err(error) => Value::err(crate::std::io_error("", &error)),
     };
-    let _ = stream.set_nonblocking(true);
+    let _ = open.stream.set_nonblocking(true);
     Ok(outcome)
 }
 
@@ -484,7 +508,7 @@ pub fn pool_drop(value: &Value, id: i64, loc: Loc) -> Outcome {
     };
     let mut borrowed = handle.borrow_mut();
     let Some(pool) = borrowed.as_mut() else { return Ok(closed("this pool")) };
-    pool.connections.retain(|(each, _)| *each != id);
+    pool.connections.retain(|open| open.id != id);
     Ok(Value::ok(Value::Nil))
 }
 
@@ -495,6 +519,32 @@ pub fn pool_close(value: &Value, loc: Loc) -> Outcome {
     };
     handle.borrow_mut().take();
     Ok(Value::Nil)
+}
+
+// korben-c6k
+/// Close every connection that has done nothing for `idle_ms`, and say which.
+///
+/// A connection that never speaks is invisible to the code above: it is never
+/// ready, so it is never reported, so nothing up there can decide to give up on
+/// it. The pool is the only place that knows it exists.
+pub fn pool_evict(value: &Value, idle_ms: i64, loc: Loc) -> Outcome {
+    let Some(handle) = as_pool(value) else {
+        return Err(wrong("Pool.evict", "a Pool", value, loc));
+    };
+    let mut borrowed = handle.borrow_mut();
+    let Some(pool) = borrowed.as_mut() else { return Ok(closed("this pool")) };
+    let limit = std::time::Duration::from_millis(idle_ms.max(0) as u64);
+    let now = std::time::Instant::now();
+    let mut dropped = Vec::new();
+    pool.connections.retain(|open| {
+        if now.duration_since(open.active) >= limit {
+            dropped.push(Value::Int(open.id));
+            false
+        } else {
+            true
+        }
+    });
+    Ok(Value::ok(Value::vector(dropped)))
 }
 
 /// The address the pool is listening on, which is how a test finds the port

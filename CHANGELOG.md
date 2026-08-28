@@ -4,6 +4,13 @@
 
 ### Added
 
+- Bounds on what one connection can hold, now that the server keeps many open.
+  A half-sent request may buffer 64 KiB before the server answers `413` and
+  hangs up, and a connection that does nothing at all for 30 seconds is closed.
+  A silent connection is invisible to `std.http` -- it is never ready, so
+  nothing there could decide to give up on it -- so `Pool.evict` is what knows
+  it exists. `Pool.write` carries a 30-second timeout, since it is deliberately
+  the one blocking call in the loop.
 - **Concurrent connection handling.** `std.http`'s server owns its listener and
   every open connection, waits for readiness across all of them at once, and
   calls the handler only when a whole request has arrived. A handler therefore
@@ -72,6 +79,10 @@
   and the same test confirms an edited dependency stops the build.
 
 ### Fixed
+
+- A response status the table does not name no longer claims to be `OK`: an
+  unknown 4xx renders as `Client Error` and an unknown 5xx as `Server Error`.
+  `413` is named outright, since the server now sends it.
 
 - A path dependency is recorded in the lockfile relative to the lockfile rather
   than to the manifest that declared it. The two coincide for a top-level
