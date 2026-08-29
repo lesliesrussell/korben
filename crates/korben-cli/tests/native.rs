@@ -630,3 +630,32 @@ fn a_rust_adapter_agrees_between_execution_modes() {
         "the two execution modes disagree about the adapter"
     );
 }
+
+// korben-str
+#[test]
+fn generated_code_compiles_without_warnings() {
+    if !cargo_available() {
+        eprintln!("skipping: no cargo on PATH");
+        return;
+    }
+    // A wall of warnings about code the user did not write, and cannot fix,
+    // reads as a compiler that does not compile cleanly. The service template
+    // produced 41 of them before this was fixed.
+    for template in ["cli", "lib", "service"] {
+        let scratch = Scratch::new(&format!("warnfree-{template}"));
+        let created = korben(scratch.path(), &["new", "app", "--template", template]);
+        assert!(created.status.success(), "{}", combined(&created));
+        let project = scratch.path().join("app");
+
+        let built = korben(&project, &["build"]);
+        assert!(built.status.success(), "{template} failed to build:\n{}", combined(&built));
+        let output = combined(&built);
+        let warnings: Vec<&str> =
+            output.lines().filter(|line| line.starts_with("warning")).collect();
+        assert!(
+            warnings.is_empty(),
+            "the {template} template's generated crate warns:\n{}",
+            warnings.join("\n")
+        );
+    }
+}
