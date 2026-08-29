@@ -330,7 +330,13 @@ Not yet implemented, and reported as such rather than stubbed silently:
   native stack, so there is no resumable representation of a partly-finished
   task. The HTTP server does not need one — it waits for readiness across every
   socket at once and calls a handler only when a whole request has arrived — but
-  real preemption, and fairness under load, do.
+  real preemption, and fairness under load, do. When it is wanted, the route is
+  a state-machine transform of async bodies rather than a stack per task: a
+  stack per task is far less work, but it needs context-switching assembly for
+  every architecture, which would quietly undo the cross compilation that
+  `--target` just gained, and it puts foreign calls and panics on a hand-managed
+  stack. The transform is portable and safe, and the differential tests already
+  exist to keep the two execution modes identical through it.
 - **TLS.** `std.http` speaks `http://` only; `https://` needs `std.crypto`.
 - **Lifetime inference.** Ownership tracks moves flow-sensitively and reports
   use-after-move, possible moves across branches, moves inside a loop, cloning a
