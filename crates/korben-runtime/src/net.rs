@@ -399,6 +399,23 @@ pub fn pool_wait(value: &Value, timeout_ms: i64, loc: Loc) -> Outcome {
     let mut borrowed = handle.borrow_mut();
     let Some(pool) = borrowed.as_mut() else { return Ok(closed("this pool")) };
 
+    // korben-k67
+    // Without `poll` there is no way to ask about several sockets at once, so
+    // readiness is approximated: accept whatever is waiting, offer every open
+    // connection, and let the reads come back empty. That is a slower server,
+    // not a broken one -- which is what this cost before the readiness loop
+    // replaced a blocking accept.
+    if !polling() {
+        accept_waiting(pool);
+        // Without this the caller would spin, since every connection is
+        // offered whether or not it has anything to say.
+        std::thread::sleep(std::time::Duration::from_millis(
+            POLL_FREE_PAUSE_MS.min(timeout_ms.max(0) as u64),
+        ));
+        let ids: Vec<Value> = pool.connections.iter().map(|open| Value::Int(open.id)).collect();
+        return Ok(Value::ok(Value::vector(ids)));
+    }
+
     #[cfg(unix)]
     let mut descriptors = {
         use std::os::unix::io::AsRawFd;
@@ -415,24 +432,7 @@ pub fn pool_wait(value: &Value, timeout_ms: i64, loc: Loc) -> Outcome {
     descriptors.clear();
 
     if ready.first().copied().unwrap_or(false) {
-        // Take everything the backlog holds, not just one: the listener will
-        // not report itself readable again for connections already waiting.
-        loop {
-            match pool.listener.accept() {
-                Ok((stream, _)) => {
-                    let _ = stream.set_nonblocking(true);
-                    let id = pool.next;
-                    pool.next += 1;
-                    pool.connections.push(Connected {
-                        id,
-                        stream,
-                        active: std::time::Instant::now(),
-                    });
-                }
-                Err(error) if error.kind() == ErrorKind::Interrupted => {}
-                Err(_) => break,
-            }
-        }
+        accept_waiting(pool);
     }
 
     // `ready` describes the connections as they were before accepting, so
@@ -445,6 +445,38 @@ pub fn pool_wait(value: &Value, timeout_ms: i64, loc: Loc) -> Outcome {
         .map(|(open, _)| Value::Int(open.id))
         .collect();
     Ok(Value::ok(Value::vector(ids)))
+}
+
+// korben-k67
+/// How long to pause when readiness cannot be asked about, so that a caller
+/// offered every connection does not spin.
+const POLL_FREE_PAUSE_MS: u64 = 10;
+
+// korben-k67
+/// Whether readiness across several sockets can be asked about at all.
+///
+/// The environment variable forces the fallback on a platform that does have
+/// `poll`, which is the only way to test that path here.
+fn polling() -> bool {
+    cfg!(unix) && std::env::var_os("KORBEN_NO_POLL").is_none()
+}
+
+// korben-k67
+/// Accept everything the backlog holds, not just one: the listener will not
+/// report itself readable again for connections already waiting.
+fn accept_waiting(pool: &mut Pool) {
+    loop {
+        match pool.listener.accept() {
+            Ok((stream, _)) => {
+                let _ = stream.set_nonblocking(true);
+                let id = pool.next;
+                pool.next += 1;
+                pool.connections.push(Connected { id, stream, active: std::time::Instant::now() });
+            }
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
 }
 
 /// Read whatever has arrived on one connection.

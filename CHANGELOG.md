@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- The HTTP server works again where `poll` is unavailable. The readiness loop
+  that landed in 0.8.0 made `serve` fail outright off Unix, narrowing platform
+  support without saying so; every test runs on Unix, so nothing caught it.
+  Without `poll` the server now offers each open connection in turn, which costs
+  a few milliseconds of latency and keeps the concurrency -- a silent client and
+  a half-sent request still hold up nobody. `KORBEN_NO_POLL` forces that path so
+  it is covered by a test on a machine that has `poll`.
+
 ## 0.9.0 — Distribution
 
 A package can be handed to somebody else. `korben publish` writes one into a
