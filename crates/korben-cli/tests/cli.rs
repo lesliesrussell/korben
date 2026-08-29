@@ -69,9 +69,9 @@ fn unknown_commands_fail_with_guidance() {
 #[test]
 fn planned_commands_say_which_milestone_they_land_in() {
     let scratch = Scratch::new("planned");
-    // korben-blf: `publish` used to be one of these and now exists, so this
+    // `publish` and `install` were both on this list and now exist, so this
     // asks about one that is still ahead.
-    let output = korben(scratch.path(), &["install"]);
+    let output = korben(scratch.path(), &["bench"]);
     assert!(!output.status.success());
     assert!(combined(&output).contains("Milestone"), "{}", combined(&output));
 }
@@ -1421,4 +1421,117 @@ fn a_package_depending_on_a_path_is_not_publishable() {
     assert!(text.contains("helper"), "{text}");
     // Nothing half-written is left behind for resolution to find.
     assert!(!registry.join("app").exists());
+}
+
+// korben-poj
+/// Whether git is on PATH, since a git registry is fetched with it.
+fn git_available() -> bool {
+    Command::new("git").arg("--version").output().map(|out| out.status.success()).unwrap_or(false)
+}
+
+// korben-poj
+/// Run git in `dir`, insisting it worked.
+fn git_in(dir: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_AUTHOR_NAME", "test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.test")
+        .env("GIT_COMMITTER_NAME", "test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.test")
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+// korben-poj
+#[test]
+fn a_package_is_fetched_from_a_git_registry_and_used() {
+    if !git_available() {
+        eprintln!("skipping: no git on PATH");
+        return;
+    }
+    let scratch = Scratch::new("gitregistry");
+    let home = scratch.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+
+    // A registry is a repository laid out exactly like a local one, which is
+    // what lets everything downstream stay unchanged.
+    let registry = scratch.path().join("registry");
+    std::fs::create_dir_all(registry.join("greeting/0.1.0/src")).unwrap();
+    std::fs::write(
+        registry.join("greeting/0.1.0/korben.toml"),
+        "[package]\nname = \"greeting\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\
+         description = \"A greeting\"\nlicense = \"MIT\"\nmain = \"greeting\"\n\n\
+         [dependencies]\n\n[dev-dependencies]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        registry.join("greeting/0.1.0/src/greeting.kb"),
+        "(module greeting)\n\n;;; Greet someone by name.\n\
+         (pub fn greet [name: String] -> String\n  (format \"hello {name}\"))\n",
+    )
+    .unwrap();
+    git_in(&registry, &["init", "-q", "."]);
+    git_in(&registry, &["add", "-A"]);
+    git_in(&registry, &["commit", "-qm", "publish greeting 0.1.0"]);
+
+    assert!(korben(scratch.path(), &["new", "consumer"]).status.success());
+    let consumer = scratch.path().join("consumer");
+    let mut manifest = std::fs::read_to_string(consumer.join("korben.toml")).unwrap();
+    manifest.push_str(&format!("\n[registry]\ngit = \"{}\"\n", registry.display()));
+    std::fs::write(consumer.join("korben.toml"), manifest).unwrap();
+
+    let run = |args: &[&str]| {
+        Command::new(EXE)
+            .args(args)
+            .current_dir(&consumer)
+            .env("NO_COLOR", "1")
+            .env("HOME", &home)
+            .env_remove("KORBEN_REGISTRY")
+            .output()
+            .expect("run korben")
+    };
+
+    let installed = run(&["install"]);
+    assert!(installed.status.success(), "{}", combined(&installed));
+    assert!(stdout(&installed).contains("cloned"), "{}", stdout(&installed));
+    assert!(stdout(&installed).contains("1 package"), "{}", stdout(&installed));
+
+    // Installing again updates the clone rather than starting over.
+    let again = run(&["install"]);
+    assert!(again.status.success(), "{}", combined(&again));
+    assert!(stdout(&again).contains("updated"), "{}", stdout(&again));
+
+    let added = run(&["add", "greeting", "--version", "^0.1"]);
+    assert!(added.status.success(), "{}", combined(&added));
+
+    std::fs::write(
+        consumer.join("src/main.kb"),
+        "(module main\n  (use greeting))\n\n\
+         (pub fn main [] -> Unit !io\n  (println (greeting.greet \"world\")))\n",
+    )
+    .unwrap();
+    std::fs::remove_file(consumer.join("tests/main_test.kb")).unwrap();
+
+    let ran = run(&["run"]);
+    assert!(ran.status.success(), "{}", combined(&ran));
+    assert_eq!(stdout(&ran), "hello world\n");
+}
+
+// korben-poj
+#[test]
+fn a_project_without_a_git_registry_is_told_what_to_add() {
+    let scratch = Scratch::new("nogitregistry");
+    assert!(korben(scratch.path(), &["new", "app"]).status.success());
+    let app = scratch.path().join("app");
+    let installed = korben(&app, &["install"]);
+    assert!(!installed.status.success());
+    let text = combined(&installed);
+    assert!(text.contains("no git registry"), "{text}");
+    assert!(text.contains("[registry]"), "{text}");
 }

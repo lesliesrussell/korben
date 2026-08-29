@@ -4,6 +4,20 @@
 
 ### Added
 
+- `korben install` fetches a registry held in a git repository. A registry is a
+  repository laid out exactly like a local one, `<name>/<version>/`, so
+  resolution, checksums, and the lockfile are unchanged by where it came from.
+  Configure it with `[registry] git = "..."`.
+- Transport is git because it is the only option that bends none of the rules
+  the toolchain already keeps. There is no HTTP client on the Rust side and no
+  TLS, and hand-writing either means cryptography that specification 22.4
+  cautions against; meanwhile the native backend already requires `cargo`, and
+  cross compilation `rustc` and `rustup`, so requiring `git` is consistent
+  rather than new. It brings TLS, authentication, and mirroring from a tool that
+  is already vetted.
+- `install` is the only command that touches a network. Resolution reads the
+  local clone and nothing else, so a build is offline whether or not the clone
+  is up to date.
 - `korben publish` copies a package into a registry, as
   `<registry>/<name>/<version>/` — the layout resolution already reads. It
   refuses more than it accepts: a package that does not check is not one to hand

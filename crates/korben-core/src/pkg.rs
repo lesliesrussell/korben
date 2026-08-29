@@ -282,7 +282,40 @@ pub fn registry_root(manifest: &Manifest) -> Option<PathBuf> {
     if let Some(path) = &manifest.registry {
         return Some(PathBuf::from(path));
     }
+    // korben-poj
+    // A git registry is read from its local clone. Resolution never reaches
+    // the network: `korben install` is the only thing that fetches, so a build
+    // is offline whether or not the clone is up to date.
+    if let Some(url) = &manifest.registry_git {
+        return git_cache(url);
+    }
     std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".korben/registry"))
+}
+
+// korben-poj
+/// Where a git registry is cloned to.
+///
+/// Named by the digest of its URL, so two registries cannot collide and the
+/// same one is always found again.
+pub fn git_cache(url: &str) -> Option<PathBuf> {
+    let digest = crate::hash::checksum(url.as_bytes());
+    let short = digest.strip_prefix("sha256:").unwrap_or(&digest);
+    std::env::var_os("HOME")
+        .map(|home| PathBuf::from(home).join(".korben/registries").join(&short[..16]))
+}
+
+// korben-poj
+/// Every package name a registry directory offers.
+pub fn registry_names(root: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(root) else { return Vec::new() };
+    let mut names: Vec<String> = entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
+        .filter(|name| !name.starts_with('.'))
+        .collect();
+    names.sort();
+    names
 }
 
 /// Every version of `name` the registry offers, newest last.
