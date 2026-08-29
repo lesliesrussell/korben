@@ -4,6 +4,13 @@
 
 ### Added
 
+- `korben publish` copies a package into a registry, as
+  `<registry>/<name>/<version>/` — the layout resolution already reads. It
+  refuses more than it accepts: a package that does not check is not one to hand
+  to anyone else, a version that already exists is never overwritten because
+  every lockfile that pinned it would start lying, and a package depending on a
+  local path could not be built by whoever installed it. The content checksum it
+  prints is the one a lockfile goes on to pin.
 - `korben run --profile` reports where a program spent its time: a table of
   functions by self time, with call counts and each one's share. Specification
   23 asks for profiling "without changing ordinary source code", and nothing in
