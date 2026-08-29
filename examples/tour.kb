@@ -5,6 +5,10 @@
   (use std.string :as string)
   (use std.json :as json))
 
+; A constant is a module-level value. The type annotation is optional, as it is
+; everywhere else, and inferred when it is left off.
+(def highest-port: Int 65535)
+
 ; Records are immutable and structurally inferred, with a nominal name at the
 ; module boundary.
 (pub type User
@@ -40,7 +44,9 @@
 ;;; Parse a port, propagating failures to the caller with `?`.
 (fn parse-port [text: String] -> Result Int String
   (let value (string.parse-int text)?)
-  (if (and (> value 0) (< value 65536)) (Ok value) (Err (format "port out of range: {value}"))))
+  (if (and (> value 0) (<= value highest-port))
+    (Ok value)
+    (Err (format "port out of range: {value}"))))
 
 ;;; Sum a vector with a guaranteed tail call.
 (fn sum [values] -> Int

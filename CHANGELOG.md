@@ -4,6 +4,10 @@
 
 ### Added
 
+- The language tour declares and uses a constant. `(def name value)` was
+  unusable until this release's first fix and appeared in no example after it,
+  which is how it stayed broken: a form nothing demonstrates is a form nobody
+  exercises.
 - `examples/workspace/`, several packages under one root. The `[workspace]`
   form shipped in 0.8.0 with tests but nothing to copy: a reader wanting more
   than one package in a repository had `examples/packages/`, which is two
