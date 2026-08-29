@@ -4,11 +4,11 @@ version = 4
 
 [[package]]
 name = "korben-adapter"
-version = "0.8.0"
+version = "0.9.0"
 
 [[package]]
 name = "korben-cli"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "korben-adapter",
  "korben-core",
@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "korben-core"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "korben-runtime",
  "korben-syntax",
@@ -27,21 +27,21 @@ dependencies = [
 
 [[package]]
 name = "korben-export"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "korben-export-macro",
 ]
 
 [[package]]
 name = "korben-export-macro"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "korben-adapter",
 ]
 
 [[package]]
 name = "korben-lsp"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "korben-core",
  "korben-runtime",
@@ -50,8 +50,8 @@ dependencies = [
 
 [[package]]
 name = "korben-runtime"
-version = "0.8.0"
+version = "0.9.0"
 
 [[package]]
 name = "korben-syntax"
-version = "0.8.0"
+version = "0.9.0"
