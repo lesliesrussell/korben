@@ -1309,3 +1309,44 @@ fn a_connection_that_does_nothing_is_evicted() {
     let text = String::from_utf8_lossy(&output.stdout).to_string();
     assert_eq!(text.trim(), "1", "expected one connection to be evicted:\n{text}");
 }
+
+// korben-ycd
+#[test]
+fn profiling_reports_where_the_time_went_without_changing_the_program() {
+    let scratch = Scratch::new("profile");
+    assert!(korben(scratch.path(), &["new", "app"]).status.success());
+    let project = scratch.path().join("app");
+    std::fs::write(
+        project.join("src/main.kb"),
+        r#"(module main)
+
+;;; Deliberately the expensive one.
+(fn work [n: Int] -> Int
+  (reduce (range n) 0 +))
+
+(fn quick [] -> Int 1)
+
+(pub fn main [] -> Unit !io
+  (println (work 20000))
+  (println (quick)))
+"#,
+    )
+    .unwrap();
+    std::fs::remove_file(project.join("tests/main_test.kb")).unwrap();
+
+    let plain = korben(&project, &["run"]);
+    assert!(plain.status.success(), "{}", combined(&plain));
+
+    let profiled = korben(&project, &["run", "--profile"]);
+    assert!(profiled.status.success(), "{}", combined(&profiled));
+
+    // Specification 23: profiling changes nothing about the program itself.
+    assert_eq!(stdout(&plain), stdout(&profiled), "the flag changed the program's output");
+
+    let report = String::from_utf8_lossy(&profiled.stderr).to_string();
+    assert!(report.contains("PROFILE"), "{report}");
+    assert!(report.contains("work"), "the expensive function is missing:\n{report}");
+    assert!(report.contains("calls"), "{report}");
+    // The report goes to stderr, so a profiled run still pipes cleanly.
+    assert!(!stdout(&profiled).contains("PROFILE"), "{}", stdout(&profiled));
+}
