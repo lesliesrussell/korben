@@ -22,6 +22,14 @@
 
 ### Fixed
 
+- Generated Rust compiles without warnings. Building the service template
+  printed 41 of them, all `break_with_label_and_loop`, about code the user did
+  not write and could not fix. The break now carries its value in parentheses,
+  which is what rustc suggests, and the two lints a generator naturally trips --
+  an unused label, an arm after one that always matches -- are allowed in the
+  generated crate beside the ones already there. A test builds every template
+  and fails on any warning.
+
 - The HTTP server works again where `poll` is unavailable. The readiness loop
   that landed in 0.8.0 made `serve` fail outright off Unix, narrowing platform
   support without saying so; every test runs on Unix, so nothing caught it.
