@@ -41,6 +41,7 @@ One executable covers the standard workflow. Every command works on a project
 | `korben update` | Re-resolve and rewrite the lockfile |
 | `korben audit` | Verify the lockfile, checksums, and package metadata |
 | `korben publish [--registry <dir>]` | Copy this package into a registry |
+| `korben install` | Fetch the git registry this project reads |
 | `korben doctor` | Toolchain and project health |
 | `korben build [--release] [--target <triple>] [--emit ir\|rust]` | Compile to a native executable |
 | `korben lsp` | Language server, over stdin and stdout |
@@ -343,16 +344,13 @@ Not yet implemented, and reported as such rather than stubbed silently:
   ownership-transfer annotations are not implemented. Function pointers and
   structs passed or returned by value are declined by the generator rather than
   guessed at.
-- **A network registry** (Milestone D). Dependencies resolve from a directory on
-  this machine — a path, or a registry root laid out as
-  `<registry>/<name>/<version>/`, which `korben publish` writes into. Fetching
-  one over a network is not implemented, and the reason is a decision rather
-  than an omission: the toolchain has no HTTP client on the Rust side and no
-  TLS, so a network registry means either shelling out to `git` for transport,
-  or signing packages and taking integrity from the signature instead — which
-  needs cryptography in the tree that specification 22.4 cautions against
-  writing. `korben install` reports the milestone it lands in. Package signing,
-  git dependencies, and sandboxed build scripts are not implemented.
+- **Package signing and provenance** (Milestone D). A registry is a directory
+  laid out as `<registry>/<name>/<version>/` — local, or a git repository that
+  `korben install` clones. What is missing is proving who published what.
+  Specification 21.3 wants verifiable signed artifacts and 22.4 warns against
+  custom cryptographic constructions, while the zero-dependency rule rules out a
+  vetted library; that tension is a decision, not an oversight. Git
+  dependencies and sandboxed build scripts are also not implemented.
 - **The rest of the language server** (specification 20.4). What is implemented
   is listed above. Rename with macro-hygiene awareness, find references, code
   actions, signature help, semantic tokens, and inlay hints are not, and the

@@ -64,6 +64,10 @@ pub struct Manifest {
     pub dev_dependencies: Vec<Dependency>,
     /// `[registry] path = "..."` — where registry dependencies are looked up.
     pub registry: Option<String>,
+    // korben-poj
+    /// `[registry] git = "..."` — a repository laid out as a registry, cloned
+    /// into a local cache by `korben install`.
+    pub registry_git: Option<String>,
     /// Capabilities build scripts and macros are granted.
     pub build_capabilities: Vec<String>,
     /// `[ffi] c = [...]` — C libraries this package links against.
@@ -92,6 +96,7 @@ impl Manifest {
             dependencies: Vec::new(),
             dev_dependencies: Vec::new(),
             registry: None,
+            registry_git: None,
             build_capabilities: Vec::new(),
             ffi_c: Vec::new(),
             ffi_rust: Vec::new(),
@@ -165,6 +170,9 @@ impl Manifest {
         if let Some(registry) = tables.get("registry") {
             manifest.registry =
                 registry.get("path").and_then(TomlValue::as_str).map(str::to_string);
+            // korben-poj
+            manifest.registry_git =
+                registry.get("git").and_then(TomlValue::as_str).map(str::to_string);
         }
 
         // Install scripts are prohibited, so a manifest that declares one is

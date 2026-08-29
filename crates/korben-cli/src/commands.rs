@@ -44,6 +44,8 @@ pub fn run(args: &[String]) -> ExitCode {
         "build" => cmd_build(rest),
         // korben-blf
         "publish" => cmd_publish(rest),
+        // korben-poj
+        "install" => cmd_install(rest),
         "doctor" => cmd_doctor(rest),
         "inspect" => cmd_inspect(rest),
         "dev" => cmd_dev(rest),
@@ -72,7 +74,6 @@ pub fn run(args: &[String]) -> ExitCode {
 /// Commands the specification defines but that land in a later milestone.
 fn planned_command(name: &str) -> Option<&'static str> {
     Some(match name {
-        "install" => "Milestone D (fetching from a network registry)",
         "bench" => "Milestone D (benchmark harness)",
         _ => return None,
     })
@@ -92,7 +93,10 @@ fn print_help() {
     println!("  remove <name>                             drop a dependency");
     println!("  update                                    re-resolve and rewrite the lockfile");
     println!("  audit                                     verify the lockfile and checksums");
-    println!("  publish [--registry <dir>]                copy this package into a registry\n");
+    println!("  publish [--registry <dir>]                copy this package into a registry");
+    println!(
+        "  install                                   fetch the git registry this project reads\n"
+    );
     println!("{}", ui::bold("DEVELOP"));
     println!("  run [entry] [--profile] [-- args...]      run a project, member, or file");
     println!("  dev                                       check, test, then run");
@@ -1711,6 +1715,95 @@ fn cmd_publish(args: &[String]) -> ExitCode {
         ui::plural(sources.len())
     );
     ExitCode::SUCCESS
+}
+
+// korben-poj
+/// Clone or update the git registry this project reads from.
+///
+/// This is the only command that touches a network. Resolution reads the clone
+/// and nothing else, so a build is offline whether or not the clone is current
+/// -- which is what specification 21 means by an offline build.
+fn cmd_install(args: &[String]) -> ExitCode {
+    let _ = Flags::parse(args);
+    let manifest_path = match manifest_path() {
+        Ok(path) => path,
+        Err(code) => return code,
+    };
+    let manifest = match korben_core::manifest::Manifest::load(&manifest_path) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            eprintln!("{} {error}", ui::red("error:"));
+            return ExitCode::FAILURE;
+        }
+    };
+    let Some(url) = manifest.registry_git.clone() else {
+        eprintln!("{} this project has no git registry", ui::red("error:"));
+        eprintln!("  Add one to `korben.toml`:");
+        eprintln!("    [registry]");
+        eprintln!("    git = \"https://example.test/registry.git\"");
+        eprintln!("  A registry is a repository laid out as <name>/<version>/.");
+        return ExitCode::from(2);
+    };
+    let Some(cache) = korben_core::pkg::git_cache(&url) else {
+        eprintln!("{} no HOME to cache the registry under", ui::red("error:"));
+        return ExitCode::FAILURE;
+    };
+
+    if git(&["--version"], None).is_none() {
+        eprintln!("{} `git` is not on PATH", ui::red("install failed:"));
+        eprintln!("  A git registry is fetched with git, the way the native backend");
+        eprintln!("  compiles with cargo. Install git, or use `[registry] path`.");
+        return ExitCode::FAILURE;
+    }
+
+    let existing = cache.join(".git").is_dir();
+    let outcome = if existing {
+        git(&["pull", "--ff-only"], Some(&cache))
+    } else {
+        if let Some(parent) = cache.parent() {
+            if let Err(error) = std::fs::create_dir_all(parent) {
+                eprintln!("{} cannot create {}: {error}", ui::red("error:"), parent.display());
+                return ExitCode::FAILURE;
+            }
+        }
+        git(&["clone", "--quiet", &url, &cache.display().to_string()], None)
+    };
+
+    match outcome {
+        Some(_) => {
+            let verb = if existing { "updated" } else { "cloned" };
+            println!("{} {url}", ui::green(verb));
+            println!("  {} {}", ui::dim("at"), cache.display());
+            let packages = korben_core::pkg::registry_names(&cache);
+            println!(
+                "  {} {} package{}",
+                ui::dim("offering"),
+                packages.len(),
+                ui::plural(packages.len())
+            );
+            ExitCode::SUCCESS
+        }
+        None => {
+            eprintln!("{} git could not fetch {url}", ui::red("install failed:"));
+            if existing {
+                eprintln!("  The clone at {} could not be fast-forwarded.", cache.display());
+                eprintln!("  Delete it to start again.");
+            }
+            ExitCode::FAILURE
+        }
+    }
+}
+
+// korben-poj
+/// Run git, returning its output when it succeeded.
+fn git(args: &[&str], directory: Option<&Path>) -> Option<String> {
+    let mut command = std::process::Command::new("git");
+    command.args(args);
+    if let Some(directory) = directory {
+        command.current_dir(directory);
+    }
+    let output = command.output().ok()?;
+    output.status.success().then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 // korben-blf
