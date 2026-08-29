@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.10.0 — Ready to read
+
+The release that took the project's own claims seriously. Every checkable
+figure in the README was wrong and is now measured; the toolchain says what it
+needs and where it runs before a reader can trip over it; the licence the
+manifests declare is actually granted; and the checks the README said ran in CI
+now do. Generated Rust compiles clean, with one lint allowed rather than nine.
 
 ### Added
 
