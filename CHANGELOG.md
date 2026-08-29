@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.9.0 — Distribution
+
+A package can be handed to somebody else. `korben publish` writes one into a
+registry, `korben install` fetches a registry held in a git repository, and git
+verifies who published it — the cryptography is git's, because specification
+21.3 wants signed artifacts, 22.4 warns against writing your own, and the
+toolchain takes no dependencies. Alongside it, `korben run --profile` says where
+a program spent its time.
 
 ### Added
 
