@@ -1,0 +1,16 @@
+;;; Helpers shared across the workspace.
+(module toolkit
+  (use std.string :as string))
+
+;;; The width of the widest line, which is what a table has to fit.
+(pub fn widest [lines: Vec String] -> Int
+  (reduce lines 0 (fn [widest line] (max widest (string.byte-length line)))))
+
+;;; Pad `text` on the right until it is `width` wide.
+(pub fn pad [text: String width: Int] -> String
+  (let short (- width (string.byte-length text)))
+  (if (> short 0) (str text (string.repeat " " short)) text))
+
+;;; A horizontal rule of `width` dashes.
+(pub fn rule [width: Int] -> String
+  (string.repeat "-" width))

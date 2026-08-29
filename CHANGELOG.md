@@ -4,6 +4,13 @@
 
 ### Added
 
+- `examples/workspace/`, several packages under one root. The `[workspace]`
+  form shipped in 0.8.0 with tests but nothing to copy: a reader wanting more
+  than one package in a repository had `examples/packages/`, which is two
+  projects linked by a path. This one shows a root that owns its members, a
+  member depending on a sibling by name with no path, and the single lockfile
+  at the root that makes two members share one answer about a shared
+  dependency.
 - The README says what the toolchain needs and where it runs, before a reader
   can trip over it: which commands reach for `cargo`, `rustc`, `rustup`, or
   `git`, that foreign calls are Unix-only, and that the HTTP server is fastest

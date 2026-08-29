@@ -1662,3 +1662,32 @@ fn an_unsigned_registry_is_refused_when_a_signature_is_required() {
         .unwrap_or(0);
     assert_eq!(cached, 0, "an unverified clone was left behind");
 }
+
+// korben-wxj
+#[test]
+fn the_workspace_example_checks_runs_and_is_formatted() {
+    // The bundled-examples test walks top-level `.kb` files, so a directory
+    // needs its own; `examples/packages/` has one for the same reason.
+    let example = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root")
+        .join("examples/workspace");
+
+    let checked = korben(&example, &["check"]);
+    assert!(checked.status.success(), "{}", combined(&checked));
+    // Every member, not just the one the root stands in for.
+    assert!(stdout(&checked).contains("2 modules"), "{}", stdout(&checked));
+
+    let ran = korben(&example, &["run"]);
+    assert!(ran.status.success(), "{}", combined(&ran));
+    assert!(stdout(&ran).contains("native backend"), "{}", stdout(&ran));
+
+    let formatted = korben(&example, &["fmt", "--check"]);
+    assert!(formatted.status.success(), "{}", combined(&formatted));
+
+    // One lockfile, at the root, recording the sibling as a member.
+    let lock = std::fs::read_to_string(example.join("korben.lock")).expect("a root lockfile");
+    assert!(lock.contains("member+toolkit"), "{lock}");
+    assert!(!example.join("report/korben.lock").exists());
+}
