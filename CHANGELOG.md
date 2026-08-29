@@ -4,6 +4,16 @@
 
 ### Added
 
+- Registry provenance, from the registry's own repository. `korben install`
+  asks git whether the latest commit carries a signature it can verify and says
+  who signed it; `[registry] signed = true` refuses a registry that does not,
+  and removes the clone rather than leaving it unverified. `korben audit`
+  reports an unsigned registry as weakened verification, which specification
+  21.3 asks for.
+- The cryptography is git's. Specification 21.3 wants verifiable signed
+  artifacts, 22.4 warns against custom constructions, and the zero-dependency
+  rule rules out a vetted library — so the verification is delegated to the tool
+  already doing the fetching, and no cryptography enters the tree.
 - `korben install` fetches a registry held in a git repository. A registry is a
   repository laid out exactly like a local one, `<name>/<version>/`, so
   resolution, checksums, and the lockfile are unchanged by where it came from.

@@ -31,6 +31,14 @@ impl TomlValue {
             _ => None,
         }
     }
+
+    // korben-868
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            TomlValue::Bool(value) => Some(*value),
+            _ => None,
+        }
+    }
 }
 
 /// One declared dependency.
@@ -68,6 +76,10 @@ pub struct Manifest {
     /// `[registry] git = "..."` — a repository laid out as a registry, cloned
     /// into a local cache by `korben install`.
     pub registry_git: Option<String>,
+    // korben-868
+    /// `[registry] signed = true` — refuse a registry whose latest commit does
+    /// not carry a signature git can verify.
+    pub registry_signed: bool,
     /// Capabilities build scripts and macros are granted.
     pub build_capabilities: Vec<String>,
     /// `[ffi] c = [...]` — C libraries this package links against.
@@ -97,6 +109,7 @@ impl Manifest {
             dev_dependencies: Vec::new(),
             registry: None,
             registry_git: None,
+            registry_signed: false,
             build_capabilities: Vec::new(),
             ffi_c: Vec::new(),
             ffi_rust: Vec::new(),
@@ -173,6 +186,9 @@ impl Manifest {
             // korben-poj
             manifest.registry_git =
                 registry.get("git").and_then(TomlValue::as_str).map(str::to_string);
+            // korben-868
+            manifest.registry_signed =
+                registry.get("signed").and_then(TomlValue::as_bool).unwrap_or(false);
         }
 
         // Install scripts are prohibited, so a manifest that declares one is

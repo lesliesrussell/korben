@@ -344,12 +344,13 @@ Not yet implemented, and reported as such rather than stubbed silently:
   ownership-transfer annotations are not implemented. Function pointers and
   structs passed or returned by value are declined by the generator rather than
   guessed at.
-- **Package signing and provenance** (Milestone D). A registry is a directory
-  laid out as `<registry>/<name>/<version>/` — local, or a git repository that
-  `korben install` clones. What is missing is proving who published what.
-  Specification 21.3 wants verifiable signed artifacts and 22.4 warns against
-  custom cryptographic constructions, while the zero-dependency rule rules out a
-  vetted library; that tension is a decision, not an oversight. Git
+- **Per-package signatures.** A registry's provenance comes from its
+  repository: `korben install` asks git whether the latest commit carries a
+  signature it can verify, and `[registry] signed = true` refuses one that does
+  not. That covers who published the registry, not who wrote each package in it.
+  Signing individual packages would need cryptography in the tree, which
+  specification 22.4 cautions against and the zero-dependency rule leaves no
+  vetted alternative for — so it stays a decision rather than an omission. Git
   dependencies and sandboxed build scripts are also not implemented.
 - **The rest of the language server** (specification 20.4). What is implemented
   is listed above. Rename with macro-hygiene awareness, find references, code

@@ -1333,6 +1333,21 @@ fn cmd_audit(_args: &[String]) -> ExitCode {
     if !manifest.ffi_c.is_empty() {
         println!("  {} links native libraries: {}", ui::yellow("note:"), manifest.ffi_c.join(", "));
     }
+    // korben-868
+    // Specification 21.3 asks that weakened verification be reported, and a
+    // registry nobody signs is exactly that.
+    if let Some(url) = &manifest.registry_git {
+        if manifest.registry_signed {
+            println!("  {} the registry must carry a signature git verifies", ui::green("ok"));
+        } else {
+            println!(
+                "  {} `{url}` is fetched without checking any signature",
+                ui::yellow("weakened:")
+            );
+            println!("       Set `signed = true` under `[registry]` to require one.");
+            findings.push("the registry's signature is not required".to_string());
+        }
+    }
 
     if findings.is_empty() {
         println!("\n{} nothing to report", ui::green("audit:"));
@@ -1771,8 +1786,34 @@ fn cmd_install(args: &[String]) -> ExitCode {
 
     match outcome {
         Some(_) => {
-            let verb = if existing { "updated" } else { "cloned" };
-            println!("{} {url}", ui::green(verb));
+            // korben-868
+            // Provenance comes from the repository's own signature, checked by
+            // git. Specification 21.3 wants verifiable signed artifacts, 22.4
+            // warns against custom cryptographic constructions, and the
+            // toolchain takes no dependencies -- so the verification is
+            // delegated to the tool already doing the fetching.
+            match signature(&cache) {
+                Signature::Good(signer) => {
+                    println!("{} {url}", ui::green("verified"));
+                    println!("  {} {signer}", ui::dim("signed by"));
+                }
+                other if manifest.registry_signed => {
+                    eprintln!(
+                        "{} the registry's latest commit {}",
+                        ui::red("install failed:"),
+                        other.describe()
+                    );
+                    eprintln!("  `[registry] signed = true` asks for a signature git can verify.");
+                    eprintln!("  The clone has been removed rather than left unverified.");
+                    let _ = std::fs::remove_dir_all(&cache);
+                    return ExitCode::FAILURE;
+                }
+                other => {
+                    let verb = if existing { "updated" } else { "cloned" };
+                    println!("{} {url}", ui::green(verb));
+                    println!("  {} {}", ui::yellow("unverified:"), other.describe());
+                }
+            }
             println!("  {} {}", ui::dim("at"), cache.display());
             let packages = korben_core::pkg::registry_names(&cache);
             println!(
@@ -1791,6 +1832,49 @@ fn cmd_install(args: &[String]) -> ExitCode {
             }
             ExitCode::FAILURE
         }
+    }
+}
+
+// korben-868
+/// What git makes of the signature on a registry's latest commit.
+enum Signature {
+    Good(String),
+    Untrusted(String),
+    Bad,
+    Missing,
+    None,
+}
+
+impl Signature {
+    fn describe(&self) -> String {
+        match self {
+            Signature::Good(signer) => format!("is signed by {signer}"),
+            Signature::Untrusted(signer) => {
+                format!("is signed by {signer}, whose key is not trusted here")
+            }
+            Signature::Bad => "carries a signature that does not verify".to_string(),
+            Signature::Missing => "is signed by a key this machine does not have".to_string(),
+            Signature::None => "carries no signature".to_string(),
+        }
+    }
+}
+
+// korben-868
+/// Ask git about the signature on the latest commit of a clone.
+fn signature(cache: &Path) -> Signature {
+    let Some(output) = git(&["log", "-1", "--format=%G?%n%GS"], Some(cache)) else {
+        return Signature::None;
+    };
+    let mut lines = output.lines();
+    let status = lines.next().unwrap_or("N").trim().to_string();
+    let signer = lines.next().unwrap_or("").trim().to_string();
+    let signer = if signer.is_empty() { "an unnamed key".to_string() } else { signer };
+    match status.as_str() {
+        "G" => Signature::Good(signer),
+        "U" => Signature::Untrusted(signer),
+        "B" => Signature::Bad,
+        "X" | "Y" | "R" | "E" => Signature::Missing,
+        _ => Signature::None,
     }
 }
 

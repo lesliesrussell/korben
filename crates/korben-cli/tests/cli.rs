@@ -1564,3 +1564,84 @@ fn a_project_without_a_git_registry_is_told_what_to_add() {
     assert!(text.contains("no git registry"), "{text}");
     assert!(text.contains("[registry]"), "{text}");
 }
+
+// korben-868
+#[test]
+fn an_unsigned_registry_is_refused_when_a_signature_is_required() {
+    if !git_available() {
+        eprintln!("skipping: no git on PATH");
+        return;
+    }
+    let scratch = Scratch::new("registrysigned");
+    let home = scratch.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+
+    let registry = scratch.path().join("registry");
+    std::fs::create_dir_all(registry.join("greeting/0.1.0/src")).unwrap();
+    std::fs::write(
+        registry.join("greeting/0.1.0/korben.toml"),
+        "[package]\nname = \"greeting\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\
+         description = \"A greeting\"\nlicense = \"MIT\"\nmain = \"greeting\"\n\n\
+         [dependencies]\n\n[dev-dependencies]\n",
+    )
+    .unwrap();
+    std::fs::write(registry.join("greeting/0.1.0/src/greeting.kb"), "(module greeting)\n").unwrap();
+    git_in(&registry, &["init", "-q", "."]);
+    git_in(&registry, &["add", "-A"]);
+    // Unsigned, which is the point.
+    git_in(&registry, &["commit", "-qm", "publish greeting 0.1.0"]);
+
+    assert!(korben(scratch.path(), &["new", "consumer"]).status.success());
+    let consumer = scratch.path().join("consumer");
+    let write_manifest = |signed: bool| {
+        let mut manifest = std::fs::read_to_string(consumer.join("korben.toml")).unwrap();
+        // Start from a manifest without a registry section either way.
+        if let Some(index) = manifest.find("\n[registry]") {
+            manifest.truncate(index);
+        }
+        manifest.push_str(&format!("\n[registry]\ngit = \"{}\"\n", registry.display()));
+        if signed {
+            manifest.push_str("signed = true\n");
+        }
+        std::fs::write(consumer.join("korben.toml"), manifest).unwrap();
+    };
+    let run = |args: &[&str]| {
+        Command::new(EXE)
+            .args(args)
+            .current_dir(&consumer)
+            .env("NO_COLOR", "1")
+            .env("HOME", &home)
+            .env_remove("KORBEN_REGISTRY")
+            .output()
+            .expect("run korben")
+    };
+
+    // Without the requirement it installs, and says plainly that it did not
+    // check anything.
+    write_manifest(false);
+    let permissive = run(&["install"]);
+    assert!(permissive.status.success(), "{}", combined(&permissive));
+    assert!(stdout(&permissive).contains("unverified"), "{}", stdout(&permissive));
+    assert!(stdout(&permissive).contains("carries no signature"), "{}", stdout(&permissive));
+
+    // `korben audit` reports it as weakened verification.
+    let audited = run(&["audit"]);
+    assert!(
+        combined(&audited).contains("without checking any signature"),
+        "{}",
+        combined(&audited)
+    );
+
+    // With the requirement it refuses, and leaves nothing behind.
+    std::fs::remove_dir_all(home.join(".korben")).ok();
+    write_manifest(true);
+    let strict = run(&["install"]);
+    assert!(!strict.status.success());
+    let text = combined(&strict);
+    assert!(text.contains("carries no signature"), "{text}");
+    assert!(text.contains("removed rather than left unverified"), "{text}");
+    let cached = std::fs::read_dir(home.join(".korben/registries"))
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(cached, 0, "an unverified clone was left behind");
+}
