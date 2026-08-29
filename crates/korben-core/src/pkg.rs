@@ -304,6 +304,33 @@ pub fn git_cache(url: &str) -> Option<PathBuf> {
         .map(|home| PathBuf::from(home).join(".korben/registries").join(&short[..16]))
 }
 
+// korben-18z
+/// How a registry is named in the lockfile.
+///
+/// A git registry is named by its URL rather than by the directory this machine
+/// cloned it into: the cache path contains `$HOME` and a digest, so recording
+/// it would put one developer's home directory in a file everyone shares. The
+/// URL is the same everywhere.
+pub fn registry_identity(manifest: &Manifest, root: &Path) -> String {
+    // Whichever setting `registry_root` honoured is the one to record, so an
+    // override still names the directory it actually used.
+    if std::env::var_os(REGISTRY_ENV).is_none() && manifest.registry.is_none() {
+        if let Some(url) = &manifest.registry_git {
+            return format!("git+{url}");
+        }
+    }
+    root.display().to_string()
+}
+
+// korben-18z
+/// The directory a recorded registry refers to.
+pub fn registry_directory(recorded: &str) -> Option<PathBuf> {
+    match recorded.strip_prefix("git+") {
+        Some(url) => git_cache(url),
+        None => Some(PathBuf::from(recorded)),
+    }
+}
+
 // korben-poj
 /// Every package name a registry directory offers.
 pub fn registry_names(root: &Path) -> Vec<String> {
@@ -490,7 +517,9 @@ pub fn resolve_all(
                         registry_versions(registry, &dependency.name)
                             .into_iter()
                             .map(|(version, path)| {
-                                (version, path, Source::Registry(registry.display().to_string()))
+                                // korben-18z
+                                let recorded = registry_identity(manifest, registry);
+                                (version, path, Source::Registry(recorded))
                             })
                             .collect()
                     }
@@ -770,7 +799,17 @@ impl Lockfile {
             let directory = match &locked.source {
                 Source::Path(relative) => normalize(&root.join(relative)),
                 Source::Registry(recorded) => {
-                    let base = registry.clone().unwrap_or_else(|| PathBuf::from(recorded));
+                    // korben-18z
+                    // The registry this project configures wins; what the
+                    // lockfile recorded is the fallback, and for a git registry
+                    // that is a URL rather than a directory.
+                    let base = match registry.clone() {
+                        Some(root) => root,
+                        None => match registry_directory(recorded) {
+                            Some(root) => root,
+                            None => continue,
+                        },
+                    };
                     base.join(&locked.name).join(locked.version.to_string())
                 }
                 // A member is relative to the workspace root, which is the root

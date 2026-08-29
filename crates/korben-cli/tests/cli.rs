@@ -1521,6 +1521,35 @@ fn a_package_is_fetched_from_a_git_registry_and_used() {
     let ran = run(&["run"]);
     assert!(ran.status.success(), "{}", combined(&ran));
     assert_eq!(stdout(&ran), "hello world\n");
+
+    // korben-18z
+    // The lockfile is shared, so it names the registry by URL rather than by
+    // the directory this machine cloned it into.
+    let lock = std::fs::read_to_string(consumer.join("korben.lock")).expect("a lockfile");
+    assert!(lock.contains("registry+git+"), "{lock}");
+    assert!(
+        !lock.contains(&home.display().to_string()),
+        "the lockfile carries this machine's home directory:\n{lock}"
+    );
+
+    // And another machine, with its own home and no clone yet, works from it.
+    let elsewhere = scratch.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
+    let there = |args: &[&str]| {
+        Command::new(EXE)
+            .args(args)
+            .current_dir(&consumer)
+            .env("NO_COLOR", "1")
+            .env("HOME", &elsewhere)
+            .env_remove("KORBEN_REGISTRY")
+            .output()
+            .expect("run korben")
+    };
+    let installed_there = there(&["install"]);
+    assert!(installed_there.status.success(), "{}", combined(&installed_there));
+    let ran_there = there(&["run"]);
+    assert!(ran_there.status.success(), "{}", combined(&ran_there));
+    assert_eq!(stdout(&ran_there), "hello world\n");
 }
 
 // korben-poj
