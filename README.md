@@ -450,6 +450,7 @@ crates/
   korben-export-macro/  the `#[korben_export]` attribute
 examples/          runnable programs, covered by the test suite;
                    `packages/` is a two-package project with a committed lock,
+                   `workspace/` several packages under one root and one lock,
                    `adapter/` a Rust library with both halves of its boundary
 spec.md            the language and platform specification
 ```

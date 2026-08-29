@@ -1,0 +1,10 @@
+[package]
+name = "toolkit"
+version = "1.0.0"
+description = "Shared helpers, used by every other member."
+license = "MIT"
+main = "toolkit"
+
+[dependencies]
+
+[dev-dependencies]

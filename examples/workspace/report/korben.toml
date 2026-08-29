@@ -1,0 +1,13 @@
+[package]
+name = "report"
+version = "0.1.0"
+description = "A program that depends on a sibling by name, with no path."
+license = "MIT"
+main = "main"
+
+# A sibling is named and versioned like any other dependency. No path: the
+# workspace root already knows where its members are.
+[dependencies]
+toolkit = "^1.0"
+
+[dev-dependencies]

@@ -1,0 +1,14 @@
+;;; A small report, laid out with helpers from a sibling package.
+(module main
+  (use toolkit :as toolkit))
+
+;;; One row, padded to the table's width.
+(fn row [label: String width: Int] -> String
+  (str "| " (toolkit.pad label width) " |"))
+
+(pub fn main [] -> Unit !io
+  (let names ["reader" "checker" "evaluator" "native backend"])
+  (let width (toolkit.widest names))
+  (println (str "+-" (toolkit.rule width) "-+"))
+  (each names (fn [name] (println (row name width))))
+  (println (str "+-" (toolkit.rule width) "-+")))

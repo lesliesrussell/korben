@@ -1,0 +1,4 @@
+# A workspace is a root that owns its members. It declares no package of its
+# own: `members` is the whole manifest.
+[workspace]
+members = ["toolkit", "report"]
