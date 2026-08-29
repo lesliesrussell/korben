@@ -15,6 +15,27 @@ cd hello-service
 ./target/release/korben dev
 ```
 
+## What it needs, and where it runs
+
+The binary has no runtime dependencies. A few things reach for a tool that has
+to be installed:
+
+| To do this | You need |
+| --- | --- |
+| `korben build` — compile to a native executable | `cargo` |
+| `korben build --target <triple>` | `rustc`, and `rustup` to install the target |
+| `korben install` — fetch a git registry | `git` |
+| Everything else — check, test, run, fmt, lint, repl, doc, lsp, publish | nothing |
+
+Two capabilities are narrower than the rest. **Foreign calls are Unix-only**:
+`dlopen` has no counterpart here, so `ffi/c-fn` and the Rust adapter do not run
+on Windows. And the **HTTP server is fastest on Unix**, where it asks the
+operating system which sockets are ready; elsewhere it offers each connection in
+turn, which costs a few milliseconds of latency and keeps the concurrency.
+
+Everything else — the language, both execution modes, packages, workspaces, the
+formatter, the language server — is portable.
+
 ## The toolchain
 
 One executable covers the standard workflow. Every command works on a project

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Added
+
+- The README says what the toolchain needs and where it runs, before a reader
+  can trip over it: which commands reach for `cargo`, `rustc`, `rustup`, or
+  `git`, that foreign calls are Unix-only, and that the HTTP server is fastest
+  on Unix and merely slower elsewhere. These were discoverable only by failing.
+
 ### Fixed
 
 - The HTTP server works again where `poll` is unavailable. The readiness loop
