@@ -1,4 +1,4 @@
-;;; A tour of the Korben language as implemented in v0.1.
+;;; A tour of the Korben language, as implemented.
 ;;;
 ;;; Run it with `korben run examples/tour.kb`.
 (module tour
