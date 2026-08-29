@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `korben run --profile` reports where a program spent its time: a table of
+  functions by self time, with call counts and each one's share. Specification
+  23 asks for profiling "without changing ordinary source code", and nothing in
+  a program changes to be profiled -- `apply_now` is the one funnel every call
+  passes through, so user functions, builtins, protocol methods, and
+  constructors are all covered by one hook.
+- Self time rather than inclusive time: the time in a function's own body, with
+  everything it called subtracted. Inclusive time double-counts a recursive call
+  and needs explaining every time it is read; self time says plainly which body
+  the program is sitting in. The report goes to stderr, so a profiled run still
+  pipes cleanly, and it is printed even when the program failed -- where the
+  time went is often the question being asked about a program that did not
+  finish.
+
 ## 0.8.0 — Milestone C
 
 The native and safe systems boundary is complete. A Rust library can be called

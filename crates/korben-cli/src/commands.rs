@@ -91,7 +91,7 @@ fn print_help() {
     println!("  update                                    re-resolve and rewrite the lockfile");
     println!("  audit                                     verify the lockfile and checksums\n");
     println!("{}", ui::bold("DEVELOP"));
-    println!("  run [entry] [--package <name>] [-- args...]  run a project, member, or file");
+    println!("  run [entry] [--profile] [-- args...]      run a project, member, or file");
     println!("  dev                                       check, test, then run");
     println!("  check [--json] [--strict-api]             type, effect, and ownership analysis");
     println!("  test [filter] [--json]                    run tests and property tests");
@@ -447,13 +447,68 @@ fn cmd_run(args: &[String]) -> ExitCode {
 
     session.interp.current = runtime;
     korben_runtime::std::set_program_args(flags.passthrough.clone());
-    match session.interp.apply(main, Vec::new(), Span::synthetic()) {
+    // korben-ycd
+    if flags.has("profile") {
+        korben_runtime::profile::start();
+    }
+    let outcome = match session.interp.apply(main, Vec::new(), Span::synthetic()) {
         Ok(value) => finish_main(&value),
         Err(flow) => {
             let diagnostic = project::flow_diagnostic(flow, Span::synthetic());
             eprint!("{}", diagnostic.render(&session.sources, ui::use_color()));
             ExitCode::FAILURE
         }
+    };
+    // Reported even when the program failed: where it spent its time is often
+    // the question being asked about a program that did not finish.
+    if flags.has("profile") {
+        report_profile();
+    }
+    outcome
+}
+
+// korben-ycd
+/// Print what the profiler recorded, longest-running body first.
+fn report_profile() {
+    let rows = korben_runtime::profile::report();
+    if rows.is_empty() {
+        eprintln!("\n{} nothing ran", ui::dim("profile:"));
+        return;
+    }
+    let total: u128 = rows.iter().map(|(_, entry)| entry.self_nanos).sum();
+    eprintln!();
+    eprintln!("{}", ui::bold("PROFILE"));
+    eprintln!(
+        "  {} is time in that function's own body, with everything it called",
+        ui::dim("self")
+    );
+    eprintln!("  {}", ui::dim("subtracted, so a recursive call is not counted twice."));
+    eprintln!();
+    eprintln!("  {:>10}  {:>10}  {:>6}  function", "calls", "self", "share");
+    for (name, entry) in rows.iter().take(20) {
+        let share = if total == 0 { 0.0 } else { entry.self_nanos as f64 * 100.0 / total as f64 };
+        eprintln!(
+            "  {:>10}  {:>10}  {:>5.1}%  {name}",
+            entry.calls,
+            human_nanos(entry.self_nanos),
+            share
+        );
+    }
+    if rows.len() > 20 {
+        eprintln!("  {}", ui::dim(&format!("and {} more", rows.len() - 20)));
+    }
+}
+
+// korben-ycd
+fn human_nanos(nanos: u128) -> String {
+    if nanos >= 1_000_000_000 {
+        format!("{:.2}s", nanos as f64 / 1_000_000_000.0)
+    } else if nanos >= 1_000_000 {
+        format!("{:.1}ms", nanos as f64 / 1_000_000.0)
+    } else if nanos >= 1_000 {
+        format!("{:.1}µs", nanos as f64 / 1_000.0)
+    } else {
+        format!("{nanos}ns")
     }
 }
 

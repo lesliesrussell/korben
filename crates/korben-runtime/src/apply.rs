@@ -39,6 +39,24 @@ pub fn apply_now(caller: &mut dyn Caller, function: &Value, args: Vec<Arg>, loc:
         ));
     };
 
+    // korben-ycd
+    // Every call comes through here, which is what lets profiling need nothing
+    // from the program being profiled.
+    if crate::profile::enabled() {
+        crate::profile::enter(&callable.name);
+        let outcome = dispatch(caller, function, args, loc);
+        // Recorded however the call ended, so a failing program still profiles.
+        crate::profile::leave();
+        return outcome;
+    }
+    dispatch(caller, function, args, loc)
+}
+
+/// Invoke a function value, whatever kind of body it has.
+fn dispatch(caller: &mut dyn Caller, function: &Value, args: Vec<Arg>, loc: Loc) -> Outcome {
+    let Value::Fn(callable) = function else {
+        return Ok(function.clone());
+    };
     match &callable.body {
         Body::Native(native) => {
             let flat = flatten(args);

@@ -30,6 +30,7 @@ One executable covers the standard workflow. Every command works on a project
 | `korben test [filter] [--json]` | Unit and property tests |
 | `korben fmt [--check] [paths...]` | Canonical formatting |
 | `korben lint [--json]` | Built-in lint rules |
+| `korben run --profile` | Report where a program spent its time |
 | `korben repl` | Project-aware REPL |
 | `korben expand <file>` | Print macro expansion through the formatter |
 | `korben doc [--out <dir>]` | Markdown docs plus a machine-readable `api.json` |
