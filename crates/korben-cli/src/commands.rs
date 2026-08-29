@@ -42,6 +42,8 @@ pub fn run(args: &[String]) -> ExitCode {
         "repl" => crate::repl::run(rest),
         "doc" => cmd_doc(rest),
         "build" => cmd_build(rest),
+        // korben-blf
+        "publish" => cmd_publish(rest),
         "doctor" => cmd_doctor(rest),
         "inspect" => cmd_inspect(rest),
         "dev" => cmd_dev(rest),
@@ -70,7 +72,7 @@ pub fn run(args: &[String]) -> ExitCode {
 /// Commands the specification defines but that land in a later milestone.
 fn planned_command(name: &str) -> Option<&'static str> {
     Some(match name {
-        "publish" | "install" => "Milestone D (a package registry)",
+        "install" => "Milestone D (fetching from a network registry)",
         "bench" => "Milestone D (benchmark harness)",
         _ => return None,
     })
@@ -89,7 +91,8 @@ fn print_help() {
     println!("  add <name> [--version <req>] [--path <dir>] [--dev]");
     println!("  remove <name>                             drop a dependency");
     println!("  update                                    re-resolve and rewrite the lockfile");
-    println!("  audit                                     verify the lockfile and checksums\n");
+    println!("  audit                                     verify the lockfile and checksums");
+    println!("  publish [--registry <dir>]                copy this package into a registry\n");
     println!("{}", ui::bold("DEVELOP"));
     println!("  run [entry] [--profile] [-- args...]      run a project, member, or file");
     println!("  dev                                       check, test, then run");
@@ -1604,6 +1607,131 @@ fn cmd_ffi_rust(flags: &Flags) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+// korben-blf
+/// Copy this package into a registry, as `<registry>/<name>/<version>/`.
+///
+/// This refuses more than it accepts, because everything it writes is something
+/// another project will pin.
+fn cmd_publish(args: &[String]) -> ExitCode {
+    let flags = Flags::parse(args);
+    let mut session = match open_session(&flags) {
+        Ok(session) => session,
+        Err(code) => return code,
+    };
+
+    // A package that does not check is not one to hand to anybody else.
+    load_all(&mut session, &flags);
+    korben_core::infer::check_session(&mut session, flags.has("strict-api"));
+    if ui::report(&session.diagnostics, &session.sources, false) {
+        eprintln!("{} {}", ui::red("publish failed:"), ui::summarize(&session.diagnostics));
+        return ExitCode::FAILURE;
+    }
+
+    // A path dependency names a directory on this machine. Nobody installing
+    // the package will have it, so it could never be built from what is
+    // published.
+    let local: Vec<String> = session
+        .manifest
+        .dependencies
+        .iter()
+        .chain(session.manifest.dev_dependencies.iter())
+        .filter(|dependency| dependency.path.is_some())
+        .map(|dependency| dependency.name.clone())
+        .collect();
+    if !local.is_empty() {
+        eprintln!(
+            "{} `{}` depends on a path: {}",
+            ui::red("publish failed:"),
+            session.manifest.name,
+            local.join(", ")
+        );
+        eprintln!("  A path names a directory on this machine, which nobody installing");
+        eprintln!("  this package will have. Publish those packages and depend on their");
+        eprintln!("  versions instead.");
+        return ExitCode::FAILURE;
+    }
+
+    let Some(registry) = flags
+        .value("registry")
+        .map(PathBuf::from)
+        .or_else(|| korben_core::pkg::registry_root(&session.manifest))
+    else {
+        eprintln!("{} no registry to publish into", ui::red("publish failed:"));
+        eprintln!("  Pass `--registry <dir>`, set `registry` in the manifest, or set HOME.");
+        return ExitCode::FAILURE;
+    };
+
+    let destination = registry.join(&session.manifest.name).join(&session.manifest.version);
+    // A published version is what a lockfile pins. If it could be replaced, a
+    // build that reproduced yesterday would stop reproducing today.
+    if destination.exists() {
+        eprintln!(
+            "{} `{}` {} is already published",
+            ui::red("publish failed:"),
+            session.manifest.name,
+            session.manifest.version
+        );
+        eprintln!("  At {}", destination.display());
+        eprintln!("  A published version never changes, because lockfiles pin it.");
+        eprintln!("  Raise the version in `korben.toml` and publish that.");
+        return ExitCode::FAILURE;
+    }
+
+    let sources = korben_core::project::source_files(&session.root.join("src"));
+    if sources.is_empty() {
+        eprintln!(
+            "{} `{}` has no sources in src/",
+            ui::red("publish failed:"),
+            session.manifest.name
+        );
+        return ExitCode::FAILURE;
+    }
+
+    if let Err(error) = copy_package(&session.root, &destination, &sources) {
+        eprintln!("{} cannot write {}: {error}", ui::red("publish failed:"), destination.display());
+        // Half a package in a registry is worse than none: resolution would
+        // find it and try to build it.
+        let _ = std::fs::remove_dir_all(&destination);
+        return ExitCode::FAILURE;
+    }
+
+    let checksum = korben_core::pkg::package_checksum(&destination);
+    println!(
+        "{} {} {} to {}",
+        ui::green("published"),
+        session.manifest.name,
+        session.manifest.version,
+        destination.display()
+    );
+    println!("  {} {checksum}", ui::dim("checksum"));
+    println!(
+        "  {} {} source file{}",
+        ui::dim("contents"),
+        sources.len(),
+        ui::plural(sources.len())
+    );
+    ExitCode::SUCCESS
+}
+
+// korben-blf
+/// Copy the manifest and every source file into a published package.
+fn copy_package(root: &Path, destination: &Path, sources: &[PathBuf]) -> std::io::Result<()> {
+    std::fs::create_dir_all(destination)?;
+    std::fs::copy(
+        root.join(korben_core::project::MANIFEST_NAME),
+        destination.join(korben_core::project::MANIFEST_NAME),
+    )?;
+    for source in sources {
+        let relative = source.strip_prefix(root).unwrap_or(source);
+        let target = destination.join(relative);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(source, &target)?;
+    }
+    Ok(())
+}
+
 // ----------------------------------------------------------- doctor/inspect
 
 fn cmd_doctor(args: &[String]) -> ExitCode {
@@ -1884,5 +2012,6 @@ fn takes_value(name: &str) -> bool {
             | "path"
             | "version"
             | "package"
+            | "registry"
     )
 }

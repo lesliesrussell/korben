@@ -69,9 +69,11 @@ fn unknown_commands_fail_with_guidance() {
 #[test]
 fn planned_commands_say_which_milestone_they_land_in() {
     let scratch = Scratch::new("planned");
-    let output = korben(scratch.path(), &["publish"]);
+    // korben-blf: `publish` used to be one of these and now exists, so this
+    // asks about one that is still ahead.
+    let output = korben(scratch.path(), &["install"]);
     assert!(!output.status.success());
-    assert!(combined(&output).contains("Milestone"));
+    assert!(combined(&output).contains("Milestone"), "{}", combined(&output));
 }
 
 // korben-mic
@@ -1349,4 +1351,74 @@ fn profiling_reports_where_the_time_went_without_changing_the_program() {
     assert!(report.contains("calls"), "{report}");
     // The report goes to stderr, so a profiled run still pipes cleanly.
     assert!(!stdout(&profiled).contains("PROFILE"), "{}", stdout(&profiled));
+}
+
+// korben-blf
+#[test]
+fn a_published_package_is_resolvable_and_immutable() {
+    let scratch = Scratch::new("publish");
+    let registry = scratch.path().join("registry");
+    let registry_arg = registry.to_str().unwrap().to_string();
+
+    assert!(korben(scratch.path(), &["new", "greeting", "--template", "lib"]).status.success());
+    let library = scratch.path().join("greeting");
+
+    let published = korben(&library, &["publish", "--registry", &registry_arg]);
+    assert!(published.status.success(), "{}", combined(&published));
+    let report = stdout(&published);
+    assert!(report.contains("published greeting 0.1.0"), "{report}");
+    let checksum = report
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("checksum "))
+        .expect("the checksum is reported")
+        .to_string();
+    assert!(registry.join("greeting/0.1.0/korben.toml").is_file());
+
+    // A published version is what a lockfile pins, so it must never change.
+    let again = korben(&library, &["publish", "--registry", &registry_arg]);
+    assert!(!again.status.success());
+    assert!(combined(&again).contains("already published"), "{}", combined(&again));
+
+    // And another project can depend on exactly that.
+    assert!(korben(scratch.path(), &["new", "app"]).status.success());
+    let app = scratch.path().join("app");
+    let added = Command::new(EXE)
+        .args(["add", "greeting", "--version", "^0.1"])
+        .current_dir(&app)
+        .env("NO_COLOR", "1")
+        .env("KORBEN_REGISTRY", &registry)
+        .output()
+        .expect("run korben");
+    assert!(added.status.success(), "{}", combined(&added));
+
+    let lock = std::fs::read_to_string(app.join("korben.lock")).expect("a lockfile");
+    assert!(lock.contains(&checksum), "the lockfile pins a different package:\n{lock}");
+
+    let checked = Command::new(EXE)
+        .arg("check")
+        .current_dir(&app)
+        .env("NO_COLOR", "1")
+        .env("KORBEN_REGISTRY", &registry)
+        .output()
+        .expect("run korben");
+    assert!(checked.status.success(), "{}", combined(&checked));
+}
+
+// korben-blf
+#[test]
+fn a_package_depending_on_a_path_is_not_publishable() {
+    let scratch = Scratch::new("publishpath");
+    let registry = scratch.path().join("registry");
+    assert!(korben(scratch.path(), &["new", "helper", "--template", "lib"]).status.success());
+    assert!(korben(scratch.path(), &["new", "app", "--template", "lib"]).status.success());
+    let app = scratch.path().join("app");
+    assert!(korben(&app, &["add", "helper", "--path", "../helper"]).status.success());
+
+    let published = korben(&app, &["publish", "--registry", registry.to_str().unwrap()]);
+    assert!(!published.status.success());
+    let text = combined(&published);
+    assert!(text.contains("depends on a path"), "{text}");
+    assert!(text.contains("helper"), "{text}");
+    // Nothing half-written is left behind for resolution to find.
+    assert!(!registry.join("app").exists());
 }
