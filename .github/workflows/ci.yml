@@ -1,0 +1,67 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    # Both, because the toolchain claims to run on both and the differences are
+    # real: foreign calls and the readiness loop are Unix-only, and the server
+    # takes its poll-free path where `poll` is missing.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Lints
+        run: cargo clippy --workspace --all-targets
+
+      # The suite includes the differential tests, which compile each program
+      # and compare its output against the interpreter byte for byte, so this
+      # step needs a working cargo -- which the runner has.
+      - name: Tests
+        run: cargo test --workspace
+
+      - name: The examples still run
+        run: |
+          cargo build --release
+          for example in examples/*.kb; do
+            ./target/release/korben check "$example"
+            ./target/release/korben run "$example" > /dev/null
+            ./target/release/korben fmt --check "$example"
+          done
+
+      # A wall of warnings about code nobody wrote is how a compiler loses a
+      # reader's trust in its output. Built outside the checkout so the step
+      # leaves nothing behind.
+      - name: Generated code compiles without warnings
+        run: |
+          korben="$PWD/target/release/korben"
+          workdir=$(mktemp -d)
+          cd "$workdir"
+          "$korben" new ci-app --template service
+          cd ci-app
+          "$korben" build 2>&1 | tee build.log
+          if grep -q '^warning' build.log; then
+            echo "the generated crate warns:" && grep '^warning' build.log
+            exit 1
+          fi

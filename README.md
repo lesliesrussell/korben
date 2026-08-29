@@ -423,7 +423,7 @@ is ready. All ten hold today:
 | # | Criterion | Where |
 | --- | --- | --- |
 | 1 | Install one executable | `cargo build --release` produces `korben`, under 2 MB, no runtime deps |
-| 2 | Create a project with `korben new` | three templates, each checked and tested in CI |
+| 2 | Create a project with `korben new` | three templates, each checked and tested on every push |
 | 3 | Write a typed HTTP or CLI program | `examples/http.kb`, `examples/tour.kb` |
 | 4 | Run it through `korben dev` with immediate diagnostics | check, test, run in one command |
 | 5 | Format and test with built-in commands | `korben fmt`, `korben test` |
@@ -454,6 +454,7 @@ examples/          runnable programs, covered by the test suite;
                    `packages/` is a two-package project with a committed lock,
                    `workspace/` several packages under one root and one lock,
                    `adapter/` a Rust library with both halves of its boundary
+.github/          formatting, lints, tests, and the examples, on every push
 spec.md            the language and platform specification
 WALKTHROUGH.md     the toolchain run end to end, with real output
 LICENSE            MIT
