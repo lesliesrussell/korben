@@ -142,7 +142,8 @@ not know is rejected with the nearest real one, and one whose standard library
 is missing names the `rustup target add` command that installs it, rather than
 surfacing as an error about a missing `std` crate.
 
-A release binary of the language tour is 587 KB and starts in about 7 ms.
+A release binary of the language tour is about 650 KB and starts in a few
+milliseconds.
 Values are still dynamically typed at run time, so compute-bound code is only
 about twice the interpreter's speed; using the inferred types to unbox is the
 next optimization, not a redesign.
@@ -398,7 +399,7 @@ is ready. All ten hold today:
 
 | # | Criterion | Where |
 | --- | --- | --- |
-| 1 | Install one executable | `cargo build --release` produces `korben`, 1.1 MB, no runtime deps |
+| 1 | Install one executable | `cargo build --release` produces `korben`, under 2 MB, no runtime deps |
 | 2 | Create a project with `korben new` | three templates, each checked and tested in CI |
 | 3 | Write a typed HTTP or CLI program | `examples/http.kb`, `examples/tour.kb` |
 | 4 | Run it through `korben dev` with immediate diagnostics | check, test, run in one command |
@@ -440,10 +441,10 @@ native builds reproducible and offline.
 ## Development
 
 ```sh
-cargo test              # 315 tests: reader, formatter, evaluator, checker,
-                        # ownership, concurrency, FFI, the Rust adapter, HTTP,
-                        # packaging, CLI, and interpreter-vs-native
-                        # differential tests
+cargo test              # over 300 tests: reader, formatter, evaluator,
+                        # checker, ownership, concurrency, FFI, the Rust
+                        # adapter, HTTP, packaging, CLI, and
+                        # interpreter-vs-native differential tests
 cargo clippy --workspace --all-targets
 cargo fmt
 ```
