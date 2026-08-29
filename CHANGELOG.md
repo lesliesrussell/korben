@@ -126,6 +126,11 @@ and measured and found wanting.
 
 ### Fixed
 
+- A lockfile names a git registry by its URL rather than by the directory this
+  machine cloned it into. The cache path contains `$HOME` and a digest of the
+  URL, so recording it put one developer's home directory into a file everyone
+  shares, and the fallback it left behind was wrong on every other machine.
+
 - A response status the table does not name no longer claims to be `OK`: an
   unknown 4xx renders as `Client Error` and an unknown 5xx as `Server Error`.
   `413` is named outright, since the server now sends it.
