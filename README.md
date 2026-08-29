@@ -456,6 +456,7 @@ examples/          runnable programs, covered by the test suite;
                    `adapter/` a Rust library with both halves of its boundary
 spec.md            the language and platform specification
 WALKTHROUGH.md     the toolchain run end to end, with real output
+LICENSE            MIT
 ```
 
 The implementation has no dependencies outside the Rust standard library, so the
