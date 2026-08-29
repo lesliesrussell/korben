@@ -4,6 +4,12 @@
 
 ### Added
 
+- `WALKTHROUGH.md`, the toolchain run end to end with the output it actually
+  prints: publishing a package, serving a registry from git and verifying who
+  signed it, depending on it, cross compiling, and profiling. Every one of those
+  shipped in 0.8.0 or 0.9.0 with tests and reference documentation but nothing
+  showing them in order. Writing it found the generated-code warnings fixed
+  above.
 - The language tour declares and uses a constant. `(def name value)` was
   unusable until this release's first fix and appeared in no example after it,
   which is how it stayed broken: a form nothing demonstrates is a form nobody

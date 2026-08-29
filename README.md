@@ -6,7 +6,9 @@ one-command modern developer experience.
 `spec.md` is the full language and platform specification. This repository is the
 Rust implementation of it. **Every acceptance criterion for v0.1 in
 specification section 28 is met.** See [Status](#status) for what is
-implemented and what is deliberately not.
+implemented and what is deliberately not, and
+[WALKTHROUGH.md](WALKTHROUGH.md) for the toolchain run end to end, with the
+output it actually prints.
 
 ```sh
 cargo build --release
@@ -453,6 +455,7 @@ examples/          runnable programs, covered by the test suite;
                    `workspace/` several packages under one root and one lock,
                    `adapter/` a Rust library with both halves of its boundary
 spec.md            the language and platform specification
+WALKTHROUGH.md     the toolchain run end to end, with real output
 ```
 
 The implementation has no dependencies outside the Rust standard library, so the
