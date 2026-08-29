@@ -9,6 +9,10 @@
 ;;; of them at once, and calls the handler only once a whole request has
 ;;; arrived — so a handler always runs to completion, and a client that connects
 ;;; and says nothing, or stops halfway through a request, holds up only itself.
+;;;
+;;; Where the operating system cannot be asked which sockets are ready — anywhere
+;;; without `poll` — the server offers each open connection in turn instead. That
+;;; costs a few milliseconds of latency, not the concurrency.
 
 (module std.http
   (use std.net :as net)

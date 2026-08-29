@@ -1100,10 +1100,24 @@ fn http_status(port: u16, timeout: std::time::Duration) -> Option<String> {
 // korben-ym2
 #[test]
 fn a_silent_client_does_not_hold_up_the_server() {
+    serve_concurrently(false);
+}
+
+// korben-k67
+#[test]
+fn a_server_without_poll_still_serves_concurrently() {
+    // What a platform with no `poll` gets. It cannot be reached on this one, so
+    // the fallback is forced; without this the path only runs on Windows, where
+    // nothing runs these tests.
+    serve_concurrently(true);
+}
+
+// korben-ym2
+fn serve_concurrently(poll_free: bool) {
     // The case that decides the design. A client that connects and never sends
     // used to stop every later client: the accepting task was underneath its
     // read and could not get back to accepting.
-    let scratch = Scratch::new("httpconcurrent");
+    let scratch = Scratch::new(if poll_free { "httpnopoll" } else { "httpconcurrent" });
     assert!(korben(scratch.path(), &["new", "server", "--template", "service"]).status.success());
     let project = scratch.path().join("server");
     let port = free_port();
@@ -1126,14 +1140,17 @@ fn a_silent_client_does_not_hold_up_the_server() {
     .unwrap();
     std::fs::remove_file(project.join("tests/main_test.kb")).unwrap();
 
-    let mut server = Command::new(EXE)
+    let mut command = Command::new(EXE);
+    command
         .arg("run")
         .current_dir(&project)
         .env("NO_COLOR", "1")
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("start the server");
+        .stderr(std::process::Stdio::piped());
+    if poll_free {
+        command.env("KORBEN_NO_POLL", "1");
+    }
+    let mut server = command.spawn().expect("start the server");
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
