@@ -4,6 +4,17 @@
 
 ### Added
 
+- Generated Rust compiles clean with one lint allowed instead of nine. The
+  header used to switch off `unused_variables`, `unused_mut`, `unused_parens`,
+  `unused_braces`, `non_snake_case`, `non_upper_case_globals`, `dead_code`,
+  `unused_imports`, and all of clippy; between them they hid 116 warnings and,
+  before that, 41 that were a genuinely wrong emission. A generated symbol now
+  joins its module and name with a single underscore and a digest, because rustc
+  does not call a name with two in a row snake case; the file imports only what
+  it turned out to use; and a local is underscore-prefixed, since a binding
+  nobody reads is Korben's own `unused-binding` lint to report, against the code
+  someone actually wrote. What is left is `dead_code`, which needs reachability
+  analysis to fix properly and is recorded as such.
 - `WALKTHROUGH.md`, the toolchain run end to end with the output it actually
   prints: publishing a package, serving a registry from git and verifying who
   signed it, depending on it, cross compiling, and profiling. Every one of those

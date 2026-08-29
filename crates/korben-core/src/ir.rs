@@ -349,6 +349,16 @@ pub fn mangle(prefix: &str, name: &str) -> String {
     if sanitized.is_empty() || sanitized.chars().next().unwrap().is_ascii_digit() {
         sanitized.insert(0, '_');
     }
+    // korben-bdg
+    // `complete?` sanitises to `complete_`, and the digest would then follow a
+    // second underscore. rustc does not call a name with two in a row snake
+    // case, and a generated crate should not warn about its own names.
+    while sanitized.ends_with('_') {
+        sanitized.pop();
+    }
+    if sanitized.is_empty() {
+        sanitized.push('x');
+    }
     format!("{prefix}{sanitized}_{:08x}", digest(name))
 }
 
@@ -363,12 +373,32 @@ fn digest(text: &str) -> u32 {
 }
 
 /// The mangled symbol for a module-level definition.
+///
+// korben-bdg
+/// The module and the name are joined by a single underscore and a digest of
+/// the pair. Two underscores would read as the obvious separator, but rustc
+/// does not consider a name containing them snake case, and a generated crate
+/// that warns about its own names teaches a reader to ignore warnings. The
+/// digest is what keeps `a` + `b_c` apart from `a_b` + `c`.
 pub fn global_symbol(module: &str, name: &str) -> String {
-    format!("{}__{}", mangle("m_", module), mangle("", name))
+    format!(
+        "{}_{}_{:08x}",
+        mangle("m_", module),
+        mangle("", name),
+        digest(&format!("{module}/{name}"))
+    )
 }
 
+// korben-bdg
+/// A local's symbol.
+///
+/// Underscore-prefixed because a binding the program does not read is the
+/// Korben `unused-binding` lint's business, reported against the code someone
+/// wrote; rustc reporting it again against generated code says the same thing
+/// about a name that reader never chose. Rust does not warn about a name
+/// beginning with an underscore, used or not.
 fn local_symbol(name: &str) -> String {
-    mangle("v_", name)
+    mangle("_v_", name)
 }
 
 // ------------------------------------------------------------------ lowering

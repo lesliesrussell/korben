@@ -304,7 +304,7 @@ fn emit_ir_and_emit_rust_produce_inspectable_output() {
     assert!(ir.status.success(), "{}", combined(&ir));
     let text = stdout(&ir);
     assert!(text.contains(";; entry:"), "{text}");
-    assert!(text.contains("(fn m_main__greeting"), "{text}");
+    assert!(text.contains("(fn m_main_greeting"), "{text}");
     assert!(text.contains("builtin:std.io/println"), "{text}");
 
     let rust = korben(&project, &["build", "--emit", "rust"]);
@@ -312,7 +312,7 @@ fn emit_ir_and_emit_rust_produce_inspectable_output() {
     let text = stdout(&rust);
     assert!(text.contains("fn main()"), "{text}");
     assert!(text.contains("korben_runtime"), "{text}");
-    assert!(text.contains("fn f_m_main__greeting"), "{text}");
+    assert!(text.contains("fn f_m_main_greeting"), "{text}");
 }
 
 #[test]
