@@ -561,6 +561,11 @@ fn cmd_test(args: &[String]) -> ExitCode {
         Err(code) => return code,
     };
     load_all(&mut session, &flags);
+    // korben-yjw
+    // Tests run against checked code. Without this the runner reports a green
+    // suite for a program that does not typecheck, so passing tests say
+    // nothing about whether the code compiles.
+    korben_core::infer::check_session(&mut session, false);
 
     if session.diagnostics.has_errors() {
         ui::report(&session.diagnostics, &session.sources, json);
