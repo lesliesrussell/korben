@@ -9,7 +9,9 @@
 
 use crate::apply::apply;
 use crate::loc::{Fault, Loc};
-use crate::value::{display, member, Arg, Flow, MapValue, Outcome, Param, RecordValue, Sym, Value};
+use crate::value::{
+    display, member, Arg, Caller, Flow, MapValue, Outcome, Param, RecordValue, Sym, Value,
+};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -1031,14 +1033,11 @@ pub fn builtin(name: &str) -> Option<Value> {
             })
         }),
 
-        "std.log/debug" | "std.log/info" | "std.log/warn" | "std.log/error" => {
-            native("log", 1, |caller, args, _| {
-                let message = args.first().map(display).unwrap_or_default();
-                let fields = args.get(1).map(|value| format!(" {value}")).unwrap_or_default();
-                caller.write(&format!("{message}{fields}\n"));
-                Ok(Value::Nil)
-            })
-        }
+        // korben-2fo
+        "std.log/debug" => native("debug", 1, |caller, args, _| log_at(caller, DEBUG, &args)),
+        "std.log/info" => native("info", 1, |caller, args, _| log_at(caller, INFO, &args)),
+        "std.log/warn" => native("warn", 1, |caller, args, _| log_at(caller, WARN, &args)),
+        "std.log/error" => native("error", 1, |caller, args, _| log_at(caller, ERROR, &args)),
 
         "std.time/now-millis" => native("now-millis", 0, |_, _args, _| {
             let millis = std::time::SystemTime::now()
@@ -1151,6 +1150,95 @@ pub fn method_of(type_name: &str, method: &str) -> Option<Value> {
 }
 
 /// Native types that own an external resource and must be released.
+// korben-2fo
+// Logging with levels, timestamps and stream routing.
+//
+// The four log functions used to share one implementation that printed only
+// the message and its fields, so `error` was byte-identical to `debug`, no
+// line carried a time, and everything went to stdout. Logs could not be
+// filtered by severity, correlated in time, or separated from ordinary output
+// by a supervisor or log shipper.
+//
+// Levels are ordered so a threshold can suppress the ones below it.
+const DEBUG: u8 = 0;
+const INFO: u8 = 1;
+const WARN: u8 = 2;
+const ERROR: u8 = 3;
+
+fn level_name(level: u8) -> &'static str {
+    match level {
+        DEBUG => "DEBUG",
+        INFO => "INFO",
+        WARN => "WARN",
+        _ => "ERROR",
+    }
+}
+
+/// The lowest level that is printed, from `KORBEN_LOG`.
+///
+/// Defaults to `info`, so `debug` is off unless asked for — a program should
+/// not have to be rebuilt to quieten its debug logging. An unrecognised value
+/// is treated as the default rather than failing: a typo in an environment
+/// variable should not stop a service from starting.
+fn threshold() -> u8 {
+    match std::env::var("KORBEN_LOG").ok().as_deref().map(str::trim) {
+        Some("debug") => DEBUG,
+        Some("warn") => WARN,
+        Some("error") => ERROR,
+        _ => INFO,
+    }
+}
+
+/// An RFC 3339 timestamp in UTC, to the second.
+///
+/// Written out here because `korben-runtime` deliberately has no dependencies.
+/// The days-to-civil conversion is the usual era-based algorithm.
+fn rfc3339(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let time = secs % 86_400;
+    let (hour, minute, second) = (time / 3_600, (time % 3_600) / 60, time % 60);
+
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or(0)
+}
+
+/// Emit one log line, if the level clears the threshold.
+///
+/// `warn` and `error` go to stderr and the quieter levels to the captured
+/// output stream, matching how `std.io/eprintln` and `std.io/println` already
+/// divide. That is what lets a supervisor separate failure output from
+/// ordinary output.
+fn log_at(caller: &mut dyn Caller, level: u8, args: &[Value]) -> Outcome {
+    if level < threshold() {
+        return Ok(Value::Nil);
+    }
+    let message = args.first().map(display).unwrap_or_default();
+    let fields = args.get(1).map(|value| format!(" {value}")).unwrap_or_default();
+    let line = format!("{} {:<5} {message}{fields}", rfc3339(now_secs()), level_name(level));
+    if level >= WARN {
+        eprintln!("{line}");
+    } else {
+        caller.write(&format!("{line}\n"));
+    }
+    Ok(Value::Nil)
+}
+
 pub const RESOURCE_TYPES: &[&str] = &["File", "Listener", "Connection", "Pool"];
 
 type FileHandle = RefCell<Option<std::fs::File>>;
@@ -1226,4 +1314,40 @@ pub fn map_from(entries: Vec<(Value, Value)>) -> Value {
         map.insert(key, value);
     }
     Value::Map(Rc::new(map))
+}
+
+// korben-2fo
+#[cfg(test)]
+mod log_tests {
+    use super::{level_name, rfc3339, DEBUG, ERROR, INFO, WARN};
+
+    /// The timestamp arithmetic is written out by hand, because the runtime
+    /// has no dependencies. These are the cases that catch a wrong one: the
+    /// epoch itself, a leap day, a century that is not a leap year, and the
+    /// last second of a year.
+    #[test]
+    fn formats_known_instants() {
+        assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339(951_782_400), "2000-02-29T00:00:00Z");
+        assert_eq!(rfc3339(1_234_567_890), "2009-02-13T23:31:30Z");
+        assert_eq!(rfc3339(1_583_020_800), "2020-03-01T00:00:00Z");
+        assert_eq!(rfc3339(4_102_444_800), "2100-01-01T00:00:00Z");
+        assert_eq!(rfc3339(1_767_225_599), "2025-12-31T23:59:59Z");
+    }
+
+    /// The ordering of the level constants is what makes a threshold able to
+    /// suppress everything below it, so the names must line up with it.
+    #[test]
+    fn level_names_follow_the_ordering() {
+        let mut named: Vec<(u8, &str)> =
+            vec![(ERROR, "ERROR"), (DEBUG, "DEBUG"), (WARN, "WARN"), (INFO, "INFO")];
+        named.sort_by_key(|(level, _)| *level);
+        assert_eq!(
+            named.iter().map(|(_, name)| *name).collect::<Vec<_>>(),
+            ["DEBUG", "INFO", "WARN", "ERROR"]
+        );
+        for (level, name) in named {
+            assert_eq!(level_name(level), name);
+        }
+    }
 }
