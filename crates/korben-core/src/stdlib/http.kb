@@ -16,6 +16,7 @@
 
 (module std.http
   (use std.net :as net)
+  (use std.process :as process)
   (use std.string :as string))
 
 (pub type Request
@@ -226,18 +227,25 @@
     (Ok opened)
       (with server opened
         (loop [pending {}]
-          (match (server.wait 1000)
-            (Err error) (Err (Transport (str error)))
-            (Ok ready)
-              (do
-                (let served (reduce ready pending (fn [waiting id] (advance server handler waiting id))))
-                ;; A connection that has gone quiet is closed here. One that
-                ;; never spoke at all is invisible above -- it is never ready,
-                ;; so nothing up there could decide to give up on it.
-                (match (server.evict idle-millis)
-                  (Err _) (recur served)
-                  (Ok dropped)
-                    (recur (reduce dropped served (fn [waiting id] (dissoc waiting id)))))))))))
+          ;; Stop accepting once a shutdown signal has arrived. A request
+          ;; already being answered has finished by the time control returns
+          ;; here, because `advance` answers inline -- so nothing is left
+          ;; half-served, and the scope closes the listener and every open
+          ;; connection on the way out.
+          (if (process.shutdown-requested?)
+            (Ok nil)
+            (match (server.wait 1000)
+              (Err error) (Err (Transport (str error)))
+              (Ok ready)
+                (do
+                  (let served (reduce ready pending (fn [waiting id] (advance server handler waiting id))))
+                  ;; A connection that has gone quiet is closed here. One that
+                  ;; never spoke at all is invisible above -- it is never ready,
+                  ;; so nothing up there could decide to give up on it.
+                  (match (server.evict idle-millis)
+                    (Err _) (recur served)
+                    (Ok dropped)
+                      (recur (reduce dropped served (fn [waiting id] (dissoc waiting id))))))))))))
 
 ;; ------------------------------------------------------------------- client
 

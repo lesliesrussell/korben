@@ -283,6 +283,7 @@ pub const NAMES: &[&str] = &[
     "std.time/sleep-millis",
     // std.process
     "std.process/args",
+    "std.process/shutdown-requested?",
     "std.process/env",
     "std.process/exit",
     // std.test
@@ -1052,6 +1053,10 @@ pub fn builtin(name: &str) -> Option<Value> {
             Ok(Value::Nil)
         }),
 
+        // korben-5k7
+        "std.process/shutdown-requested?" => native("shutdown-requested?", 0, |_, _args, _| {
+            Ok(Value::Bool(crate::signal::requested()))
+        }),
         "std.process/args" => native("args", 0, |_, _args, _| {
             Ok(Value::vector(program_args().into_iter().map(Value::str).collect()))
         }),

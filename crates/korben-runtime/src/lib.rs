@@ -13,6 +13,7 @@ pub mod json;
 pub mod loc;
 pub mod net;
 pub mod profile;
+pub mod signal;
 pub mod std;
 pub mod task;
 pub mod value;
