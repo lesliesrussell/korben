@@ -101,10 +101,17 @@ pub struct MapValue {
     index: std::cell::RefCell<Option<std::collections::HashMap<u64, Vec<usize>>>>,
 }
 
-/// Below this many entries, scanning beats hashing. Small maps -- a query
-/// string, a header set, a handful of options -- are the common case and
-/// should not pay for an index they would not benefit from.
-const INDEX_THRESHOLD: usize = 16;
+/// Below this many entries, scanning beats hashing and the index is not
+/// built at all.
+///
+/// The number is set from measurement, not taste. Records, query strings,
+/// header sets and decoded JSON objects are the common maps and they are
+/// small: a beads issue decodes to 18 keys. At that size, comparing keywords
+/// down a short vector is faster than hashing plus a `HashMap` probe, and an
+/// earlier threshold of 16 made a real workload 10-13% *slower* by pulling
+/// every one of those field accesses onto the indexed path. The index is for
+/// maps large enough that the scan is the thing that hurts.
+const INDEX_THRESHOLD: usize = 128;
 
 impl Clone for MapValue {
     fn clone(&self) -> Self {
@@ -147,9 +154,10 @@ impl MapValue {
             }
             built
         });
-        let candidates = index.get(&hash)?.clone();
-        drop(cache);
-        candidates.into_iter().find(|at| self.entries[*at].0.eq_value(key))
+        // `index` borrows only `self.index`; `self.entries` is a separate
+        // field and is read directly, so the candidates need not be copied out
+        // -- an allocation per lookup would undo much of what the index buys.
+        index.get(&hash)?.iter().copied().find(|at| self.entries[*at].0.eq_value(key))
     }
 
     pub fn get(&self, key: &Value) -> Option<&Value> {
