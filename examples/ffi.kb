@@ -14,6 +14,9 @@
 (ffi/c-fn strlen [text: CStr] -> CULong)
 (ffi/c-fn abs [value: CInt] -> CInt)
 (ffi/c-fn getenv [name: CStr] -> CStr)
+; The maths functions are libm's. macOS keeps them in libSystem beside the rest
+; of libc, so either name works there; Linux does not, so say which is meant.
+(ffi/c-library "m")
 (ffi/c-fn pow [base: CDouble exponent: CDouble] -> CDouble)
 
 ;;; Length of a string in bytes, as C counts it.

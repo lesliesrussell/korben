@@ -7,6 +7,14 @@ fn signature(symbol: &str, params: Vec<CType>, ret: CType) -> CSignature {
     CSignature { library: "c".to_string(), symbol: symbol.to_string(), params, ret }
 }
 
+// korben-t9l
+/// The maths functions are libm's. macOS keeps them in libSystem beside the
+/// rest of libc, so naming either works there; Linux does not, so the
+/// declaration has to say which library it means.
+fn math_signature(symbol: &str, params: Vec<CType>, ret: CType) -> CSignature {
+    CSignature { library: "m".to_string(), symbol: symbol.to_string(), params, ret }
+}
+
 /// `Flow` carries values that are not `Debug`, so tests unwrap it by hand.
 fn ok(result: korben_runtime::Outcome, what: &str) -> Value {
     match result {
@@ -40,7 +48,7 @@ fn calls_a_function_taking_an_integer() {
 
 #[test]
 fn calls_a_function_taking_a_double() {
-    let sig = signature("sqrt", vec![CType::Double], CType::Double);
+    let sig = math_signature("sqrt", vec![CType::Double], CType::Double);
     let result = ok(call(&sig, vec![Value::Float(16.0)], "sqrt", Loc::NONE), "sqrt");
     assert!(matches!(result, Value::Float(value) if value == 4.0), "{result}");
 }

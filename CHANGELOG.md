@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- A maths function resolves on Linux. `sqrt` and `pow` live in libm, which
+  macOS keeps in libSystem beside the rest of libc and Linux does not, so a
+  declaration naming `c` found them on one platform and not the other. A symbol
+  missing from the running process is now looked for in the library the
+  declaration actually named, and the declarations that meant libm say so.
+  Every test ran on macOS until CI ran them on Linux too, which is what CI was
+  added for.
+
 ## 0.10.0 — Ready to read
 
 The release that took the project's own claims seriously. Every checkable

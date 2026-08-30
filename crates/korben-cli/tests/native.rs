@@ -339,8 +339,12 @@ fn foreign_calls_agree_between_execution_modes() {
 (ffi/c-library "c")
 (ffi/c-fn strlen [text: CStr] -> CULong)
 (ffi/c-fn abs [value: CInt] -> CInt)
-(ffi/c-fn pow [base: CDouble exponent: CDouble] -> CDouble)
 (ffi/c-fn getenv [name: CStr] -> CStr)
+
+; korben-t9l: the maths functions are libm's, which is only the same object as
+; libc on macOS.
+(ffi/c-library "m")
+(ffi/c-fn pow [base: CDouble exponent: CDouble] -> CDouble)
 
 (pub fn byte-length [text: String] -> Int !ffi !unsafe
   (unsafe (strlen text)))

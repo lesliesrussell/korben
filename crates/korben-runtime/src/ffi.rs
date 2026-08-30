@@ -222,7 +222,16 @@ fn resolve(signature: &CSignature, loc: Loc) -> Result<usize, Flow> {
         return Err(Flow::fault(Fault::new("ffi-symbol", "symbol name contains a NUL byte", loc)));
     };
     // SAFETY: `handle` came from `dlopen` and `symbol` is NUL-terminated.
-    let address = unsafe { dlsym(handle as *mut c_void, symbol.as_ptr()) };
+    let mut address = unsafe { dlsym(handle as *mut c_void, symbol.as_ptr()) };
+    // korben-t9l
+    // The process handle answers for whatever the process already carries,
+    // which is not the same set on every platform. When it does not have the
+    // symbol, ask the library the declaration actually named.
+    if address.is_null() && is_process_library(&signature.library) {
+        if let Some(found) = resolve_in_file(&signature.library, &symbol) {
+            address = found as *mut c_void;
+        }
+    }
     if address.is_null() {
         return Err(Flow::fault(
             Fault::new(
@@ -237,6 +246,32 @@ fn resolve(signature: &CSignature, loc: Loc) -> Result<usize, Flow> {
     let address = address as usize;
     SYMBOLS.with(|cache| cache.borrow_mut().insert(key, address));
     Ok(address)
+}
+
+// korben-t9l
+/// Look for `symbol` in the library `name` actually names, having failed to
+/// find it in the running process.
+///
+/// The two are the same thing on macOS, where the maths functions live in
+/// libSystem beside the rest of libc. They are not on Linux, where libm is its
+/// own object that the process need not already carry -- which is why `sqrt`
+/// resolved in one place and not the other.
+#[cfg(unix)]
+fn resolve_in_file(name: &str, symbol: &CStr) -> Option<usize> {
+    for candidate in candidates(name) {
+        let Ok(path) = CString::new(candidate) else { continue };
+        // SAFETY: `path` is NUL-terminated and valid for this call.
+        let handle = unsafe { dlopen(path.as_ptr(), RTLD_NOW) };
+        if handle.is_null() {
+            continue;
+        }
+        // SAFETY: `handle` came from `dlopen` and `symbol` is NUL-terminated.
+        let address = unsafe { dlsym(handle, symbol.as_ptr()) };
+        if !address.is_null() {
+            return Some(address as usize);
+        }
+    }
+    None
 }
 
 #[cfg(not(unix))]
