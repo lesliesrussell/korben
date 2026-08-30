@@ -217,7 +217,23 @@ pub fn construct(
     let mut named: Vec<(String, Value)> = Vec::new();
     for arg in args {
         match arg.keyword {
-            Some(keyword) => named.push((keyword, arg.value)),
+            // korben-eq7
+            // A keyword only names a field when the type declares one by that
+            // name. Otherwise it is a keyword *value* that happened to be
+            // written before another argument, and it passes through
+            // positionally -- the same rule `bind_args` already applies to
+            // functions. Without this, a type whose first field is a Keyword
+            // could not be constructed positionally at all: the leading
+            // keyword was eaten as a name, and the call failed at run time
+            // with an arity error counting one argument fewer than was
+            // written, having passed `korben check` cleanly.
+            Some(keyword) if fields.iter().any(|field| &**field == keyword.as_str()) => {
+                named.push((keyword, arg.value));
+            }
+            Some(keyword) => {
+                positional.push(Value::Keyword(Rc::from(keyword.as_str())));
+                positional.push(arg.value);
+            }
             None => positional.push(arg.value),
         }
     }
@@ -483,4 +499,72 @@ pub fn call_member(
         .label("unknown field or method")
         .help(format!("available fields: {}", crate::value::member_names(receiver))),
     ))
+}
+
+// korben-eq7
+#[cfg(test)]
+mod construct_tests {
+    use super::*;
+    use crate::value::{display, Sym};
+
+    fn fields(names: &[&str]) -> Vec<Sym> {
+        names.iter().map(|name| Rc::from(*name)).collect()
+    }
+
+    /// A keyword that names no field is a value, not a name. Before this, the
+    /// leading keyword was eaten as an argument name, the call was counted one
+    /// argument short, and it failed at run time having passed `korben check`.
+    #[test]
+    fn a_keyword_literal_can_be_a_positional_field_value() {
+        let built = construct(
+            "Req",
+            None,
+            &fields(&["method", "path"]),
+            vec![Arg::positional(Value::keyword("post")), Arg::positional(Value::str("/p"))],
+            Loc::NONE,
+        )
+        .unwrap_or_else(|_| panic!("positional construction failed"));
+
+        // The same call as it actually arrives from the reader, where `:post`
+        // and the argument after it have been folded into one named argument.
+        let folded = construct(
+            "Req",
+            None,
+            &fields(&["method", "path"]),
+            vec![Arg::named("post", Value::str("/p"))],
+            Loc::NONE,
+        )
+        .unwrap_or_else(|_| panic!("keyword literal written positionally failed"));
+
+        assert_eq!(display(&folded), display(&built));
+    }
+
+    /// A keyword that does name a field still binds by name.
+    #[test]
+    fn a_keyword_naming_a_field_still_binds_by_name() {
+        let built = construct(
+            "Point",
+            None,
+            &fields(&["x", "y"]),
+            vec![Arg::named("y", Value::Int(2)), Arg::named("x", Value::Int(1))],
+            Loc::NONE,
+        )
+        .unwrap_or_else(|_| panic!("named construction failed"));
+        // Named arguments bind by name, so the written order does not matter.
+        assert_eq!(display(&built), "Point{x 1 y 2}");
+    }
+
+    /// Mixing them: `:x` names a field and binds, `:tag` does not and is a value.
+    #[test]
+    fn a_naming_keyword_and_a_value_keyword_can_appear_together() {
+        let built = construct(
+            "Tagged",
+            None,
+            &fields(&["tag", "note"]),
+            vec![Arg::named("tag", Value::keyword("urgent")), Arg::named("note", Value::str("hi"))],
+            Loc::NONE,
+        )
+        .unwrap_or_else(|_| panic!("mixed keyword construction failed"));
+        assert_eq!(display(&built), "Tagged{tag :urgent note \"hi\"}");
+    }
 }
