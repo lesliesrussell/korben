@@ -37,27 +37,150 @@ pub enum Value {
     Foreign(Rc<Foreign>),
 }
 
+// korben-90o
+/// A hash for keys whose equality is simple enough to mirror exactly.
+///
+/// Returning `None` means "do not index this key" and costs only the linear
+/// scan that every lookup used to do, so the fallback is always correct. That
+/// is the point: `eq_value` compares collections, records and variants
+/// order-insensitively and structurally, and a hash that disagreed with it
+/// even once would produce a silently wrong lookup. Only shapes where
+/// agreement is obvious are indexed.
+///
+/// The numeric tower is the one subtlety. `eq_value` holds that `Int(1)`
+/// equals `Float(1.0)`, so an integral float must hash as the integer it
+/// equals. That also settles `-0.0`, which `==` says equals `0.0` while its
+/// bits do not: both are integral and hash through the integer path.
+fn hash_key(key: &Value) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    match key {
+        Value::Nil => 0u8.hash(&mut hasher),
+        Value::Bool(flag) => (1u8, flag).hash(&mut hasher),
+        Value::Int(number) => (2u8, number).hash(&mut hasher),
+        Value::Float(number) => {
+            // Hash as an integer when the value is one, so the numeric tower
+            // agrees. Otherwise the bits are exact and only equal themselves.
+            if number.is_finite()
+                && number.fract() == 0.0
+                && *number >= i64::MIN as f64
+                && *number <= i64::MAX as f64
+            {
+                (2u8, *number as i64).hash(&mut hasher);
+            } else {
+                (3u8, number.to_bits()).hash(&mut hasher);
+            }
+        }
+        Value::Str(text) => (4u8, text.as_str()).hash(&mut hasher),
+        Value::Keyword(name) => (5u8, name.as_ref()).hash(&mut hasher),
+        Value::Symbol(name) => (6u8, name.as_ref()).hash(&mut hasher),
+        // Everything else compares structurally; fall back to scanning.
+        _ => return None,
+    }
+    Some(hasher.finish())
+}
+
 /// An insertion-ordered map. Korben guarantees deterministic iteration order.
-#[derive(Clone, Default)]
+///
+/// `entries` carries that order and is what every reader iterates.
+///
+/// `index` is a *cache*, not state: a lazily built map from key hash to the
+/// positions holding it. Looking a key up used to walk the whole map calling
+/// `eq_value` on every entry, which made ordinary application code quadratic,
+/// because the language offers no other way to find a value by key.
+///
+/// It is deliberately lazy and deliberately dropped on clone. Korben's maps
+/// are persistent -- `assoc` copies the map -- so building an index eagerly
+/// would put the cost of one on every insert, and measurably did: building a
+/// 4000-entry map went from 47ms to 178ms before this was made lazy. A clone
+/// therefore starts with no index, and only a map that is actually looked up,
+/// and big enough to be worth it, ever builds one.
+#[derive(Default)]
 pub struct MapValue {
     pub entries: Vec<(Value, Value)>,
+    index: std::cell::RefCell<Option<std::collections::HashMap<u64, Vec<usize>>>>,
+}
+
+/// Below this many entries, scanning beats hashing. Small maps -- a query
+/// string, a header set, a handful of options -- are the common case and
+/// should not pay for an index they would not benefit from.
+const INDEX_THRESHOLD: usize = 16;
+
+impl Clone for MapValue {
+    fn clone(&self) -> Self {
+        MapValue { entries: self.entries.clone(), index: std::cell::RefCell::new(None) }
+    }
 }
 
 impl MapValue {
+    fn scan(&self, key: &Value) -> Option<usize> {
+        self.entries.iter().position(|(existing, _)| existing.eq_value(key))
+    }
+
+    /// Where `key` lives, if anywhere.
+    ///
+    /// `may_build` is what keeps writes cheap. A lookup is happy to pay once
+    /// for an index it will reuse, but `insert` and `remove` must not: maps
+    /// are persistent, so a write usually lands on a freshly copied map whose
+    /// index is empty, and building one per write is how this change first
+    /// made building a 4000-entry map 8x slower instead of faster. A write
+    /// uses an index that already exists and otherwise scans.
+    fn position(&self, key: &Value, may_build: bool) -> Option<usize> {
+        let hash = match hash_key(key) {
+            Some(hash) if self.entries.len() >= INDEX_THRESHOLD => hash,
+            // Either the key is one the index refuses, or the map is small
+            // enough that scanning is the cheaper answer. Both are correct.
+            _ => return self.scan(key),
+        };
+        if !may_build && self.index.borrow().is_none() {
+            return self.scan(key);
+        }
+
+        let mut cache = self.index.borrow_mut();
+        let index = cache.get_or_insert_with(|| {
+            let mut built: std::collections::HashMap<u64, Vec<usize>> =
+                std::collections::HashMap::with_capacity(self.entries.len());
+            for (at, (existing, _)) in self.entries.iter().enumerate() {
+                if let Some(hash) = hash_key(existing) {
+                    built.entry(hash).or_default().push(at);
+                }
+            }
+            built
+        });
+        let candidates = index.get(&hash)?.clone();
+        drop(cache);
+        candidates.into_iter().find(|at| self.entries[*at].0.eq_value(key))
+    }
+
     pub fn get(&self, key: &Value) -> Option<&Value> {
-        self.entries.iter().find(|(existing, _)| existing.eq_value(key)).map(|(_, value)| value)
+        self.position(key, true).map(|at| &self.entries[at].1)
     }
 
     pub fn insert(&mut self, key: Value, value: Value) {
-        match self.entries.iter_mut().find(|(existing, _)| existing.eq_value(&key)) {
-            Some(slot) => slot.1 = value,
-            None => self.entries.push((key, value)),
+        match self.position(&key, false) {
+            Some(at) => self.entries[at].1 = value,
+            None => {
+                // Appending keeps every existing position valid, so an index
+                // that already exists is extended rather than thrown away.
+                let at = self.entries.len();
+                if let Some(cached) = self.index.borrow_mut().as_mut() {
+                    if let Some(hash) = hash_key(&key) {
+                        cached.entry(hash).or_default().push(at);
+                    }
+                }
+                self.entries.push((key, value));
+            }
         }
     }
 
     pub fn remove(&mut self, key: &Value) -> Option<Value> {
-        let index = self.entries.iter().position(|(existing, _)| existing.eq_value(key))?;
-        Some(self.entries.remove(index).1)
+        let at = self.position(key, false)?;
+        let removed = self.entries.remove(at).1;
+        // Removing shifts every later position, so the cache is dropped rather
+        // than patched. A patched index that drifted would be worse than a
+        // rebuilt one, and the next lookup pays for it only if it needs to.
+        *self.index.borrow_mut() = None;
+        Some(removed)
     }
 
     pub fn len(&self) -> usize {
@@ -555,4 +678,123 @@ fn write_seq(
         write!(out, "{item}")?;
     }
     out.write_str(close)
+}
+
+// korben-90o
+#[cfg(test)]
+mod map_tests {
+    use super::*;
+
+    fn map(pairs: &[(Value, Value)]) -> MapValue {
+        let mut built = MapValue::default();
+        for (key, value) in pairs {
+            built.insert(key.clone(), value.clone());
+        }
+        built
+    }
+
+    /// The index must agree with `eq_value` exactly. `eq_value` holds that an
+    /// integer equals an equal float, so a lookup by one must find the other
+    /// -- the case a naive hash gets wrong and gets wrong silently.
+    #[test]
+    fn the_numeric_tower_agrees_with_equality() {
+        let built = map(&[(Value::Int(1), Value::str("one"))]);
+        assert!(Value::Int(1).eq_value(&Value::Float(1.0)));
+        assert_eq!(built.get(&Value::Float(1.0)).map(display), Some("one".to_string()));
+
+        let built = map(&[(Value::Float(2.0), Value::str("two"))]);
+        assert_eq!(built.get(&Value::Int(2)).map(display), Some("two".to_string()));
+
+        // Inserting the other spelling of the same number replaces it rather
+        // than adding a second entry.
+        let mut built = map(&[(Value::Int(3), Value::str("first"))]);
+        built.insert(Value::Float(3.0), Value::str("second"));
+        assert_eq!(built.len(), 1);
+        assert_eq!(built.get(&Value::Int(3)).map(display), Some("second".to_string()));
+    }
+
+    /// `-0.0 == 0.0` is true while their bits differ, so hashing the bits
+    /// would lose the entry.
+    #[test]
+    fn negative_zero_finds_positive_zero() {
+        let built = map(&[(Value::Float(0.0), Value::str("zero"))]);
+        assert!(Value::Float(-0.0).eq_value(&Value::Float(0.0)));
+        assert_eq!(built.get(&Value::Float(-0.0)).map(display), Some("zero".to_string()));
+    }
+
+    /// A float that is not a whole number is only equal to itself, and a NaN
+    /// key is equal to nothing at all -- including itself.
+    #[test]
+    fn fractional_and_nan_keys_behave_like_equality_says() {
+        let built = map(&[(Value::Float(1.5), Value::str("half"))]);
+        assert_eq!(built.get(&Value::Float(1.5)).map(display), Some("half".to_string()));
+        assert!(built.get(&Value::Float(2.5)).is_none());
+
+        let built = map(&[(Value::Float(f64::NAN), Value::str("nan"))]);
+        assert!(built.get(&Value::Float(f64::NAN)).is_none());
+    }
+
+    /// Keys the index refuses still work, because the fallback is the scan
+    /// every lookup used to do. Mixing them with indexed keys must not let
+    /// either kind hide the other.
+    #[test]
+    fn unindexed_keys_still_resolve_alongside_indexed_ones() {
+        let vector = Value::vector(vec![Value::Int(1), Value::Int(2)]);
+        let mut built = MapValue::default();
+        built.insert(vector.clone(), Value::str("by vector"));
+        built.insert(Value::keyword("plain"), Value::str("by keyword"));
+
+        assert_eq!(built.get(&vector).map(display), Some("by vector".to_string()));
+        assert_eq!(
+            built.get(&Value::keyword("plain")).map(display),
+            Some("by keyword".to_string())
+        );
+        assert!(built.get(&Value::vector(vec![Value::Int(9)])).is_none());
+    }
+
+    /// Iteration order is a documented guarantee, so insertion order must
+    /// survive both replacement and removal.
+    #[test]
+    fn insertion_order_survives_replacement_and_removal() {
+        let mut built = MapValue::default();
+        for name in ["a", "b", "c", "d"] {
+            built.insert(Value::keyword(name), Value::str(name));
+        }
+        built.insert(Value::keyword("b"), Value::str("replaced"));
+        let order: Vec<String> = built.entries.iter().map(|(key, _)| display(key)).collect();
+        assert_eq!(order, [":a", ":b", ":c", ":d"]);
+
+        assert_eq!(
+            built.remove(&Value::keyword("b")).map(|v| display(&v)),
+            Some("replaced".to_string())
+        );
+        let order: Vec<String> = built.entries.iter().map(|(key, _)| display(key)).collect();
+        assert_eq!(order, [":a", ":c", ":d"]);
+
+        // Everything still resolves after the positions shifted underneath.
+        assert_eq!(built.get(&Value::keyword("d")).map(display), Some("d".to_string()));
+        assert!(built.get(&Value::keyword("b")).is_none());
+    }
+
+    /// The shape the HTTP accept loop uses: many keys inserted, then removed
+    /// one at a time. This is what was quadratic.
+    #[test]
+    fn many_keys_insert_find_and_remove_correctly() {
+        let mut built = MapValue::default();
+        for id in 0..500i64 {
+            built.insert(Value::Int(id), Value::str(format!("connection {id}")));
+        }
+        assert_eq!(built.len(), 500);
+        assert_eq!(built.get(&Value::Int(499)).map(display), Some("connection 499".to_string()));
+
+        for id in (0..500i64).step_by(2) {
+            assert_eq!(
+                built.remove(&Value::Int(id)).map(|v| display(&v)),
+                Some(format!("connection {id}"))
+            );
+        }
+        assert_eq!(built.len(), 250);
+        assert!(built.get(&Value::Int(250)).is_none());
+        assert_eq!(built.get(&Value::Int(251)).map(display), Some("connection 251".to_string()));
+    }
 }
