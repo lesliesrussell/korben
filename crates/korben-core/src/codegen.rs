@@ -1420,6 +1420,8 @@ pub const RUNTIME_FILES: &[(&str, &str)] = &[
     ("src/ffi.rs", include_str!("../../korben-runtime/src/ffi.rs")),
     ("src/net.rs", include_str!("../../korben-runtime/src/net.rs")),
     ("src/profile.rs", include_str!("../../korben-runtime/src/profile.rs")),
+    // korben-5k7
+    ("src/signal.rs", include_str!("../../korben-runtime/src/signal.rs")),
     ("src/task.rs", include_str!("../../korben-runtime/src/task.rs")),
     ("src/std.rs", include_str!("../../korben-runtime/src/std.rs")),
     ("src/json.rs", include_str!("../../korben-runtime/src/json.rs")),

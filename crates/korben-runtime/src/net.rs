@@ -94,6 +94,8 @@ fn yield_or_wait(caller: &mut dyn Caller) -> Result<Step, Flow> {
 }
 
 pub fn listen(address: &str) -> Outcome {
+    // korben-5k7: a program that serves gets shutdown handling without asking.
+    crate::signal::watch();
     Ok(match TcpListener::bind(address) {
         Ok(listener) => Value::ok(listener_value(listener)),
         Err(error) => Value::err(crate::std::io_error(address, &error)),
@@ -313,8 +315,16 @@ fn readable(fds: &[std::os::raw::c_int], timeout_ms: i32) -> std::io::Result<Vec
         let count = unsafe { poll(polled.as_mut_ptr(), polled.len() as NfdsT, timeout_ms) };
         if count < 0 {
             let error = std::io::Error::last_os_error();
-            // A signal is not a failure; ask again.
+            // korben-5k7
+            // A signal is not a failure, so the usual answer is to ask again.
+            // But if it was a request to shut down, retrying here is what made
+            // SIGINT invisible: the loop swallowed it and the process could
+            // only be killed. Report no readiness instead, so the caller
+            // reaches its own shutdown check.
             if error.kind() == ErrorKind::Interrupted {
+                if crate::signal::requested() {
+                    return Ok(vec![false; polled.len()]);
+                }
                 continue;
             }
             return Err(error);
@@ -373,6 +383,8 @@ fn as_pool(value: &Value) -> Option<&PoolHandle> {
 
 /// Bind an address and start a pool on it.
 pub fn pool(address: &str) -> Outcome {
+    // korben-5k7: a program that serves gets shutdown handling without asking.
+    crate::signal::watch();
     let listener = match TcpListener::bind(address) {
         Ok(listener) => listener,
         Err(error) => return Ok(Value::err(crate::std::io_error(address, &error))),
