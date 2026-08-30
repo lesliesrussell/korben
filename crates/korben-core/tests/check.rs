@@ -371,3 +371,49 @@ fn a_macro_or_a_function_on_its_own_is_not_reported() {
     // A different name is not a collision, however similar.
     assert!(lint("(fn twice-over [n: Int] -> Int (* 2 n))\n(macro twice [form] `~form)").is_empty());
 }
+
+// korben-3cb
+#[test]
+fn a_key_the_map_cannot_hold_is_reported() {
+    // A String-keyed map indexed with a Keyword, which is the shape that
+    // arises when JSON data (Keyword-keyed) and an HTTP request's query
+    // (String-keyed) are handled in the same function.
+    assert_eq!(
+        check(r#"(fn f [m: Map String String] -> String (get m :status "default"))"#),
+        vec!["map-key-type"]
+    );
+    // And the other direction.
+    assert_eq!(
+        check(r#"(fn f [m: Map Keyword Int] -> Int (get m "status" 0))"#),
+        vec!["map-key-type"]
+    );
+}
+
+// korben-3cb
+#[test]
+fn a_key_the_map_can_hold_is_accepted() {
+    assert!(check(r#"(fn f [m: Map String String] -> String (get m "status" "d"))"#).is_empty());
+    assert!(check(r#"(fn f [m: Map Keyword Int] -> Int (get m :status 0))"#).is_empty());
+}
+
+// korben-3cb
+#[test]
+fn a_map_key_check_stays_quiet_where_the_answer_is_not_settled() {
+    // Not a map: `get` is overloaded across Vec and Record too, and neither
+    // takes the map's idea of a key.
+    assert!(check(r#"(fn f [v: Vec String] -> String (get v 0 "d"))"#).is_empty());
+    // A map whose key type is still open must not be guessed at.
+    assert!(check(r#"(fn f [m] (get m :anything "d"))"#).is_empty());
+}
+
+// korben-3cb
+#[test]
+fn a_local_binding_named_get_is_not_the_builtin() {
+    // Shadowing must not be mistaken for the builtin and reported against.
+    assert!(check(
+        r#"(fn f [m: Map String String] -> String
+             (let get (fn [a b c] "shadowed"))
+             (get m :status "d"))"#
+    )
+    .is_empty());
+}

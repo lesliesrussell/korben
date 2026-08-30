@@ -1345,6 +1345,75 @@ impl Checker {
         }
     }
 
+    // korben-3cb
+    /// Report a key whose type the map cannot hold.
+    ///
+    /// `get`, `assoc`, `dissoc` and `contains?` are runtime builtins, and the
+    /// checker has no signature for any builtin -- they infer as `Unknown`. So
+    /// nothing caught indexing a `Map String String` with a Keyword, and
+    /// nothing at run time caught it either: a key of the wrong type simply
+    /// fails to match and `get` returns the default, which usually looks like
+    /// a plausible answer. Two conventions meet in ordinary code -- JSON
+    /// decodes to Keyword-keyed maps while `http.Request`'s query and headers
+    /// are String-keyed -- so this is easy to write and silent when wrong.
+    ///
+    /// These builtins are overloaded across Map, Record, Variant and Vec, each
+    /// with its own idea of a key, so they cannot be given one signature
+    /// without protocol dispatch. This check therefore fires only where the
+    /// answer is not in doubt: the collection is known to be a `Map`, its key
+    /// type is concrete, the key given is concrete, and the two disagree. A
+    /// type still being inferred, or a collection that is not a map, is left
+    /// alone.
+    fn check_map_key(&mut self, callee: &Expr, args: &[(&Arg, Type)], scope: &Scope) {
+        let Expr::Var(name, _) = callee else { return };
+        if scope.lookup(name).is_some() {
+            // Shadowed by a local binding, so this is not the builtin.
+            return;
+        }
+        if !matches!(name.as_str(), "get" | "assoc" | "dissoc" | "contains?") {
+            return;
+        }
+        // The reader folds `:name value` into one argument. A builtin declares
+        // no named parameters, so both parts are really positional and the key
+        // is whichever comes second once they are unfolded -- the same
+        // re-expansion the generic call path does further down. Checking the
+        // folded list instead reads the wrong argument, which both misses the
+        // real mismatch and invents one that is not there.
+        let mut flat: Vec<(&Arg, Type)> = Vec::with_capacity(args.len() + 1);
+        for (arg, ty) in args {
+            if arg.keyword.is_some() {
+                flat.push((arg, Type::keyword()));
+            }
+            flat.push((arg, ty.clone()));
+        }
+        let [(_, collection), (key_arg, key), ..] = flat.as_slice() else { return };
+        let Type::Con(container, params) = self.prune(collection) else { return };
+        if &*container != "Map" {
+            return;
+        }
+        let Some(expected) = params.first().map(|ty| self.prune(ty)) else { return };
+        let (Some(expected_name), Some(actual_name)) =
+            (concrete_name(&expected), concrete_name(&self.prune(key)))
+        else {
+            return;
+        };
+        if expected_name == actual_name {
+            return;
+        }
+        self.diagnostics.push(
+            Diagnostic::error(format!(
+                "this map has `{expected_name}` keys, but the key given is a `{actual_name}`"
+            ))
+            .with_code("map-key-type")
+            .at(key_arg.span, format!("a `{actual_name}` cannot be a key of this map"))
+            .note(format!("map key type: {expected_name}"))
+            .help(
+                "a key of the wrong type matches nothing, so the lookup quietly \
+                 returns its default rather than failing",
+            ),
+        );
+    }
+
     fn infer_call(&mut self, callee: &Expr, args: &[Arg], span: Span, scope: &mut Scope) -> Type {
         // `(User { id .. name .. })` constructs by field name rather than
         // position, so check it against the declaration directly.
@@ -1404,6 +1473,8 @@ impl Checker {
         for arg in args {
             arg_types.push((arg, self.infer(&arg.value, scope)));
         }
+        // korben-3cb
+        self.check_map_key(callee, &arg_types, scope);
         match self.prune(&callee_type) {
             Type::Fn(function) => {
                 self.effects = self.effects.union(function.effects);
@@ -1846,6 +1917,19 @@ fn is_numeric(name: &str) -> bool {
             | "Float32"
             | "Float64"
     )
+}
+
+// korben-3cb
+/// The name of a type that is settled, or `None` while it is still open.
+///
+/// Only a `Con` with no arguments is treated as settled here. A variable, an
+/// `Unknown`, or a parameterised type is not something to report a mismatch
+/// against.
+fn concrete_name(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Con(name, params) if params.is_empty() => Some(name.to_string()),
+        _ => None,
+    }
 }
 
 fn builtin_type_names() -> HashSet<String> {
