@@ -1138,7 +1138,7 @@ impl Generator {
     }
 
     // korben-b13
-    /// Integer arithmetic on operands the checker settled as `Int`.
+    /// Two-operand integer builtins on operands the checker settled as `Int`.
     ///
     /// The general path builds a `vec![Arg::positional(..)]`, looks the builtin
     /// up and goes through `apply`, which is a lot of work to add two numbers
@@ -1146,24 +1146,38 @@ impl Generator {
     ///
     /// Anything the fast path does not cover falls through to that general path
     /// rather than being reimplemented here: a value that turns out not to be
-    /// an `Int` after all, and an overflow. Overflow is rare and its fault
-    /// message is exact, so delegating it keeps the two paths identical by
-    /// construction instead of by my copying the wording. And the checker is
-    /// not sound everywhere -- `type_of` is partial by design -- so the
-    /// fallback is what makes reading it here safe at all.
-    fn int_arithmetic(
+    /// an `Int` after all, an overflow, a division by zero. Those faults are
+    /// rare and their messages are exact, so delegating them keeps the two
+    /// paths identical by construction instead of by my copying the wording.
+    /// And the checker is not sound everywhere -- `type_of` is partial by
+    /// design -- so the fallback is what makes reading it here safe at all.
+    ///
+    /// Comparison of two `Int`s is the one family with nothing to decline:
+    /// `cmp_value` and `eq_value` compare them with the machine operators and
+    /// cannot fail, so those arms answer outright.
+    fn int_binary(
         &mut self,
         callee: &Expr,
         args: &[ir::Arg],
         span: korben_syntax::Span,
     ) -> Option<String> {
         let Expr::Ref(Ref::Builtin(name), _) = callee else { return None };
-        let operator = match name.as_str() {
-            "std.core/+" => "checked_add",
-            "std.core/-" => "checked_sub",
-            "std.core/*" => "checked_mul",
-            _ => return None,
-        };
+        if !matches!(
+            name.as_str(),
+            "std.core/+"
+                | "std.core/-"
+                | "std.core/*"
+                | "std.core//"
+                | "std.core/mod"
+                | "std.core/<"
+                | "std.core/<="
+                | "std.core/>"
+                | "std.core/>="
+                | "std.core/="
+                | "std.core/not="
+        ) {
+            return None;
+        }
         // Two operands only. The variadic fold is the general path's business.
         let [left, right] = args else { return None };
         if left.keyword.is_some() || right.keyword.is_some() {
@@ -1183,15 +1197,36 @@ impl Generator {
             Some(slot) => format!("KB{slot}.with(Value::clone)"),
             None => format!("builtin_or_panic({})", quote(name)),
         };
+        let fallback = format!(
+            "kb_try!({outer}, apply(__c, &{general}, \
+             vec![Arg::positional({l}.clone()), Arg::positional({r}.clone())], {loc}))"
+        );
+        // `None` from a checked operator is every case the fast path declines:
+        // an overflow for the arithmetic operators, and for `/` and `mod` a
+        // zero divisor as well. Each is a fault the general path already
+        // raises, with wording this must not fork.
+        let checked = |operator: &str| {
+            format!("match a.{operator}(*b) {{ Some(v) => Value::Int(v), None => {fallback} }}")
+        };
+        let fast = match name.as_str() {
+            "std.core/+" => checked("checked_add"),
+            "std.core/-" => checked("checked_sub"),
+            "std.core/*" => checked("checked_mul"),
+            "std.core//" => checked("checked_div"),
+            "std.core/mod" => checked("checked_rem_euclid"),
+            "std.core/<" => "Value::Bool(a < b)".to_string(),
+            "std.core/<=" => "Value::Bool(a <= b)".to_string(),
+            "std.core/>" => "Value::Bool(a > b)".to_string(),
+            "std.core/>=" => "Value::Bool(a >= b)".to_string(),
+            "std.core/=" => "Value::Bool(a == b)".to_string(),
+            "std.core/not=" => "Value::Bool(a != b)".to_string(),
+            _ => return None,
+        };
         Some(format!(
             "{{ let {l} = {left_code}; let {r} = {right_code}; \
              match (&{l}, &{r}) {{ \
-             (Value::Int(a), Value::Int(b)) => match a.{operator}(*b) {{ \
-             Some(v) => Value::Int(v), \
-             None => kb_try!({outer}, apply(__c, &{general}, \
-             vec![Arg::positional({l}.clone()), Arg::positional({r}.clone())], {loc})) }}, \
-             _ => kb_try!({outer}, apply(__c, &{general}, \
-             vec![Arg::positional({l}.clone()), Arg::positional({r}.clone())], {loc})) }} }}"
+             (Value::Int(a), Value::Int(b)) => {fast}, \
+             _ => {fallback} }} }}"
         ))
     }
 
@@ -1238,7 +1273,7 @@ impl Generator {
         }
 
         // korben-b13
-        if let Some(specialised) = self.int_arithmetic(callee, args, span) {
+        if let Some(specialised) = self.int_binary(callee, args, span) {
             return specialised;
         }
 

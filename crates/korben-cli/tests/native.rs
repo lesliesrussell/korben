@@ -268,6 +268,70 @@ fn runtime_faults_report_identically() {
     assert!(interpreted.contains("faults.kb:5:12"), "{interpreted}");
 }
 
+// korben-b13
+/// Codegen specialises two-operand integer arithmetic, comparison, division
+/// and `mod` when the checker settled both operands as `Int`. The
+/// specialisation is only sound if it answers exactly what the general path
+/// answers -- including where it declines, which is the whole reason the
+/// declines are listed here beside the cases it takes.
+#[test]
+fn specialised_integer_operators_agree_between_execution_modes() {
+    assert_same(
+        "intops",
+        "intops",
+        r#"(module intops)
+
+(fn add [a: Int b: Int] -> Int (+ a b))
+(fn sub [a: Int b: Int] -> Int (- a b))
+(fn mul [a: Int b: Int] -> Int (* a b))
+(fn div [a: Int b: Int] -> Int (/ a b))
+(fn rem [a: Int b: Int] -> Int (mod a b))
+(fn lt [a: Int b: Int] -> Bool (< a b))
+(fn le [a: Int b: Int] -> Bool (<= a b))
+(fn gt [a: Int b: Int] -> Bool (> a b))
+(fn ge [a: Int b: Int] -> Bool (>= a b))
+(fn eq [a: Int b: Int] -> Bool (= a b))
+(fn ne [a: Int b: Int] -> Bool (not= a b))
+
+(pub fn main [] -> Unit !io
+  (println (add 2 3) (sub 10 4) (mul 6 7) (div 10 3) (rem -7 3))
+  (println (add -5 5) (mul -6 7) (div -10 3) (rem 7 -3))
+  (println (lt 1 2) (lt 2 1) (le 2 2) (gt 3 3) (ge 3 3))
+  (println (eq 4 4) (eq 4 5) (ne 4 5) (ne 4 4))
+  ; Declined: not two Ints, so the general path answers across the tower.
+  (println (+ 1.5 2.25) (* 2 1.5) (< 1 1.5))
+  ; Declined: not two operands.
+  (println (+ 1 2 3 4) (< 1 2 3) (= 1 1 1)))
+"#,
+    );
+}
+
+// korben-b13
+/// `mod` by zero is a fault the general path raises. The specialisation must
+/// hand it back rather than divide, and must not fork the wording: the report
+/// has to be identical in both modes, down to the source line.
+#[test]
+fn a_specialised_modulo_by_zero_reports_identically() {
+    if !cargo_available() {
+        eprintln!("skipping: no cargo on PATH");
+        return;
+    }
+    let (interpreted, native) = both_ways(
+        "modzero",
+        "modzero",
+        r#"(module modzero)
+
+(fn rem [a: Int b: Int] -> Int (mod a b))
+
+(pub fn main [] -> Unit !io
+  (println "before")
+  (println (rem 7 0)))
+"#,
+    );
+    assert_eq!(interpreted, native, "fault reports differ");
+    assert!(interpreted.contains("error[divide-by-zero]"), "{interpreted}");
+}
+
 #[test]
 fn every_project_template_agrees() {
     if !cargo_available() {
