@@ -361,3 +361,56 @@ fn a_def_without_a_value_is_reported() {
     let result = run("(def limit)\n(fn main [] 1)");
     assert_eq!(result.diagnostics, vec!["def-value"]);
 }
+
+// korben-0mo
+/// Renaming within a filesystem is atomic, which is what makes
+/// write-then-rename safe. Without it a program has no way to replace a file
+/// without a window in which it is truncated.
+#[test]
+fn a_file_can_be_replaced_atomically() {
+    let dir = std::env::temp_dir().join(format!("korben-rename-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let target = dir.join("state.json");
+    std::fs::write(&target, "old").unwrap();
+
+    let result = run(&format!(
+        r#"(module m (use std.fs :as fs))
+           (fn main [] -> Unit !io
+             (let target "{}")
+             (let temp "{}")
+             (match (fs.write-text temp "new")
+               (Err e) (println "write failed:" e)
+               (Ok _)
+                 (match (fs.rename temp target)
+                   (Err e) (println "rename failed:" e)
+                   (Ok _) (println "replaced"))))"#,
+        target.display(),
+        dir.join("state.json.tmp").display()
+    ));
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert_eq!(result.output.trim_end(), "replaced");
+
+    // The new content is in place and nothing was left beside it.
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
+    assert!(!dir.join("state.json.tmp").exists(), "the temporary file should be gone");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// korben-0mo
+#[test]
+fn renaming_something_absent_reports_a_failure() {
+    let dir = std::env::temp_dir().join(format!("korben-rename-miss-{}", std::process::id()));
+    let result = run(&format!(
+        r#"(module m (use std.fs :as fs))
+           (fn main [] -> Unit !io
+             (match (fs.rename "{}" "{}")
+               (Ok _) (println "succeeded")
+               (Err _) (println "failed")))"#,
+        dir.join("not-there").display(),
+        dir.join("destination").display()
+    ));
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    // A rename that cannot happen must say so rather than report success.
+    assert_eq!(result.output.trim_end(), "failed");
+}
