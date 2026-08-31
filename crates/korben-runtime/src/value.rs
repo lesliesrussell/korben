@@ -263,10 +263,10 @@ pub struct Function {
 
 /// Native functions receive a caller so higher-order builtins such as `map`
 /// can invoke Korben functions in either execution mode.
-pub type NativeFn = fn(&mut dyn Caller, Vec<Value>, Loc) -> Outcome;
+pub type NativeFn = fn(&dyn Caller, Vec<Value>, Loc) -> Outcome;
 
 /// Generated native code installs its functions as boxed Rust closures.
-pub type RustFn = Box<dyn Fn(&mut dyn Caller, Vec<Arg>, Loc) -> Outcome>;
+pub type RustFn = Box<dyn Fn(&dyn Caller, Vec<Arg>, Loc) -> Outcome>;
 
 pub enum Body {
     /// A standard-library function, shared by both execution modes.
@@ -324,15 +324,22 @@ pub type Outcome = Result<Value, Flow>;
 /// single copy of the standard library serve both execution modes. Call a
 /// function value with [`crate::apply`], never through this trait directly:
 /// `call_host` exists only so `apply` can hand back the bodies it cannot run.
+// korben-bud
+/// The runtime's way back into the host.
+///
+/// Every method takes `&self`. That is load-bearing rather than stylistic: a
+/// task suspended on its own stack keeps its borrow of the host alive while
+/// the scheduler resumes another task, which needs its own. Two shared borrows
+/// of one host are fine; two unique ones are undefined behaviour.
 pub trait Caller {
     /// Invoke a closure whose body the host owns.
-    fn call_host(&mut self, function: &Value, args: Vec<Arg>, loc: Loc) -> Outcome;
+    fn call_host(&self, function: &Value, args: Vec<Arg>, loc: Loc) -> Outcome;
 
     /// Find an implementation of `method` for `receiver`, if one is registered.
-    fn find_method(&mut self, receiver: &Value, method: &str) -> Option<Value>;
+    fn find_method(&self, receiver: &Value, method: &str) -> Option<Value>;
 
     /// Write program output. The REPL and test runner capture it.
-    fn write(&mut self, text: &str);
+    fn write(&self, text: &str);
 }
 
 // ------------------------------------------------------------- constructors

@@ -15,6 +15,7 @@ use crate::value::{
 };
 use korben_syntax::span::Span;
 use korben_syntax::Syntax;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::io::Write;
 use std::rc::Rc;
@@ -48,7 +49,11 @@ pub struct TypeInfo {
 
 pub struct Interp {
     pub modules: HashMap<String, Rc<ModuleRuntime>>,
-    pub current: Rc<ModuleRuntime>,
+    // korben-bud
+    /// The four fields below move during a call, so they carry their own
+    /// mutability and the whole evaluation path can take `&self`. Everything
+    /// else here is filled in while loading, before any of it runs.
+    pub current: RefCell<Rc<ModuleRuntime>>,
     pub types: HashMap<String, Rc<TypeInfo>>,
     /// Variant constructor name to owning enum type.
     pub variant_owner: HashMap<String, String>,
@@ -57,8 +62,8 @@ pub struct Interp {
     pub impls: HashMap<(String, String), HashMap<String, Value>>,
     /// Method name to the protocol that declares it.
     pub method_owner: HashMap<String, String>,
-    pub out: Output,
-    depth: usize,
+    pub out: RefCell<Output>,
+    depth: Cell<usize>,
     /// Maximum call depth before reporting recursion as a fault. The default is
     /// conservative for a standard 2 MiB stack; the CLI raises it after moving
     /// evaluation onto a thread with a much larger stack.
@@ -66,7 +71,7 @@ pub struct Interp {
     /// Names of tests registered by loaded modules.
     pub tests: Vec<(String, String, Rc<TestDecl>, Rc<ModuleRuntime>)>,
     /// True while running inside `unsafe`, for diagnostics.
-    pub in_unsafe: bool,
+    pub in_unsafe: Cell<bool>,
     /// Macros visible during expansion, keyed by name.
     pub macros: HashMap<String, Rc<crate::expand::MacroEntry>>,
 }
@@ -74,7 +79,7 @@ pub struct Interp {
 /// The runtime calls back into the interpreter through this trait: it owns
 /// closure bodies, protocol implementations, and program output.
 impl Caller for Interp {
-    fn call_host(&mut self, function: &Value, args: Vec<RtArg>, loc: Loc) -> EvalResult {
+    fn call_host(&self, function: &Value, args: Vec<RtArg>, loc: Loc) -> EvalResult {
         match as_closure(function) {
             Some(closure) => self.call_closure(&closure, args, span_of(loc)),
             None => Err(Flow::fault(
@@ -85,12 +90,12 @@ impl Caller for Interp {
         }
     }
 
-    fn find_method(&mut self, receiver: &Value, method: &str) -> Option<Value> {
+    fn find_method(&self, receiver: &Value, method: &str) -> Option<Value> {
         Interp::find_method(self, receiver, method)
     }
 
-    fn write(&mut self, text: &str) {
-        self.out.write(text);
+    fn write(&self, text: &str) {
+        self.out.borrow_mut().write(text);
     }
 }
 
@@ -107,17 +112,17 @@ impl Interp {
         modules.insert("user".to_string(), root.clone());
         let mut interp = Interp {
             modules,
-            current: root,
+            current: RefCell::new(root),
             types: HashMap::new(),
             variant_owner: HashMap::new(),
             protocols: HashMap::new(),
             impls: HashMap::new(),
             method_owner: HashMap::new(),
-            out: Output::Stdout,
-            depth: 0,
+            out: RefCell::new(Output::Stdout),
+            depth: Cell::new(0),
             max_depth: 128,
             tests: Vec::new(),
-            in_unsafe: false,
+            in_unsafe: Cell::new(false),
             macros: HashMap::new(),
         };
         crate::builtins::install(&mut interp);
@@ -153,8 +158,8 @@ impl Interp {
 
     /// Resolve `alias.name` / `alias/name` against imports and known modules.
     pub fn lookup_path(&self, alias: &str, name: &str) -> Option<Value> {
-        let target = self
-            .current
+        let current = self.current.borrow().clone();
+        let target = current
             .aliases
             .borrow()
             .get(alias)
@@ -171,7 +176,7 @@ impl Interp {
 
     // --------------------------------------------------------- evaluation
 
-    pub fn eval_body(&mut self, body: &Body, env: &Env) -> EvalResult {
+    pub fn eval_body(&self, body: &Body, env: &Env) -> EvalResult {
         let scope = env.child();
         let mut deferred: Vec<(Body, Env)> = Vec::new();
         let mut result = Value::Nil;
@@ -236,7 +241,7 @@ impl Interp {
         Ok(result)
     }
 
-    pub fn eval(&mut self, expr: &Expr, env: &Env) -> EvalResult {
+    pub fn eval(&self, expr: &Expr, env: &Env) -> EvalResult {
         match expr {
             Expr::Nil(_) => Ok(Value::Nil),
             Expr::Bool(value, _) => Ok(Value::Bool(*value)),
@@ -333,7 +338,7 @@ impl Interp {
             Expr::Lambda(decl, _) => Ok(closure_value(Rc::new(Closure {
                 decl: decl.clone(),
                 env: env.clone(),
-                module: self.current.name.clone(),
+                module: self.current.borrow().name.clone(),
             }))),
             Expr::Field { target, name, span } => {
                 let value = self.eval_field_target(target, name, *span, env)?;
@@ -485,10 +490,10 @@ impl Interp {
                 result
             }
             Expr::Unsafe(body, _) => {
-                let previous = self.in_unsafe;
-                self.in_unsafe = true;
+                let previous = self.in_unsafe.get();
+                self.in_unsafe.set(true);
                 let result = self.eval_body(body, env);
-                self.in_unsafe = previous;
+                self.in_unsafe.set(previous);
                 result
             }
             Expr::Await(inner, span) => {
@@ -520,11 +525,11 @@ impl Interp {
         }
     }
 
-    fn lookup_var(&mut self, name: &str, span: Span, env: &Env) -> EvalResult {
+    fn lookup_var(&self, name: &str, span: Span, env: &Env) -> EvalResult {
         if let Some(value) = env.lookup(name) {
             return Ok(value);
         }
-        let current = self.current.clone();
+        let current = self.current.borrow().clone();
         if let Some(value) = self.lookup_global(&current, name) {
             return Ok(value);
         }
@@ -541,8 +546,9 @@ impl Interp {
     /// Closest known name by edit distance, used for `did you mean` help.
     fn suggest_name(&self, name: &str) -> Option<String> {
         let mut best: Option<(usize, String)> = None;
-        let globals = self.current.globals.borrow();
-        let imported = self.current.imported.borrow();
+        let current = self.current.borrow().clone();
+        let globals = current.globals.borrow();
+        let imported = current.imported.borrow();
         let candidates = globals.keys().chain(imported.keys());
         for candidate in candidates {
             let distance = edit_distance(name, candidate);
@@ -555,7 +561,7 @@ impl Interp {
 
     // --------------------------------------------------------------- calls
 
-    fn eval_call(&mut self, callee: &Expr, args: &[Arg], span: Span, env: &Env) -> EvalResult {
+    fn eval_call(&self, callee: &Expr, args: &[Arg], span: Span, env: &Env) -> EvalResult {
         // `(target.method args)` binds the receiver when `method` is a method.
         if let Expr::Field { target, name, span: field_span } = callee {
             match self.eval_field_target(target, name, *field_span, env)? {
@@ -581,7 +587,7 @@ impl Interp {
         apply(self, &function, arguments, loc_of(span))
     }
 
-    fn eval_args(&mut self, args: &[Arg], env: &Env) -> Result<Vec<RtArg>, Flow> {
+    fn eval_args(&self, args: &[Arg], env: &Env) -> Result<Vec<RtArg>, Flow> {
         let mut values = Vec::with_capacity(args.len());
         for arg in args {
             values.push(RtArg { keyword: arg.keyword.clone(), value: self.eval(&arg.value, env)? });
@@ -592,7 +598,7 @@ impl Interp {
     /// Invoke a value. Dispatch itself lives in the runtime, so the interpreter
     /// and generated code agree on arity, keyword arguments, and construction.
     pub fn apply(
-        &mut self,
+        &self,
         function: Value,
         args: Vec<(Option<String>, Value)>,
         span: Span,
@@ -601,10 +607,10 @@ impl Interp {
         apply(self, &function, args, loc_of(span))
     }
 
-    fn call_closure(&mut self, closure: &Rc<Closure>, args: Vec<RtArg>, span: Span) -> EvalResult {
-        self.depth += 1;
-        if self.depth > self.max_depth {
-            self.depth -= 1;
+    fn call_closure(&self, closure: &Rc<Closure>, args: Vec<RtArg>, span: Span) -> EvalResult {
+        self.depth.set(self.depth.get() + 1);
+        if self.depth.get() > self.max_depth {
+            self.depth.set(self.depth.get() - 1);
             return Err(Flow::fault(
                 Fault::error("recursion limit reached")
                     .with_code("stack-overflow")
@@ -613,9 +619,9 @@ impl Interp {
             ));
         }
 
-        let previous_module = self.current.clone();
+        let previous_module = self.current.borrow().clone();
         if let Some(module) = self.modules.get(&*closure.module) {
-            self.current = module.clone();
+            *self.current.borrow_mut() = module.clone();
         }
 
         let mut arguments = args;
@@ -637,13 +643,13 @@ impl Interp {
             }
         };
 
-        self.current = previous_module;
-        self.depth -= 1;
+        *self.current.borrow_mut() = previous_module;
+        self.depth.set(self.depth.get() - 1);
         result
     }
 
     fn bind_params(
-        &mut self,
+        &self,
         decl: &FnDecl,
         args: Vec<RtArg>,
         scope: &Env,
@@ -675,7 +681,7 @@ impl Interp {
     // -------------------------------------------------------------- fields
 
     fn eval_field_target(
-        &mut self,
+        &self,
         target: &Expr,
         name: &str,
         span: Span,
@@ -684,7 +690,7 @@ impl Interp {
         // `alias.name` may be a module member rather than a field access.
         if let Expr::Var(root, _) = target {
             if env.lookup(root).is_none() {
-                let current = self.current.clone();
+                let current = self.current.borrow().clone();
                 if self.lookup_global(&current, root).is_none() {
                     if let Some(value) = self.lookup_path(root, name) {
                         return Ok(FieldTarget::Resolved(value));
@@ -703,7 +709,7 @@ impl Interp {
         Ok(FieldTarget::Value(self.eval(target, env)?))
     }
 
-    pub fn field_of(&mut self, value: &Value, name: &str, span: Span) -> EvalResult {
+    pub fn field_of(&self, value: &Value, name: &str, span: Span) -> EvalResult {
         match member(value, name) {
             Some(value) => Ok(value),
             None => Err(Flow::fault(
@@ -729,7 +735,7 @@ impl Interp {
     }
 
     /// Release a resource when a `with` scope exits, on every path.
-    fn close_resource(&mut self, value: &Value, span: Span) {
+    fn close_resource(&self, value: &Value, span: Span) {
         if let Some(method) = self.find_method(value, "drop") {
             let _ = self.apply(method, vec![(None, value.clone())], span);
         }
@@ -738,7 +744,7 @@ impl Interp {
     // ------------------------------------------------------------ patterns
 
     /// Try to match `value` against `pattern`, defining bindings in `scope`.
-    pub fn bind_pattern(&mut self, pattern: &Pattern, value: &Value, scope: &Env) -> bool {
+    pub fn bind_pattern(&self, pattern: &Pattern, value: &Value, scope: &Env) -> bool {
         match pattern {
             Pattern::Wildcard(_) => true,
             Pattern::Binding(name, _) => {
@@ -812,7 +818,7 @@ impl Interp {
     // ------------------------------------------------- syntax construction
 
     /// Build a syntax object from a syntax-quote template, filling `~` holes.
-    fn build_template(&mut self, template: &Template, env: &Env) -> Result<Syntax, Flow> {
+    fn build_template(&self, template: &Template, env: &Env) -> Result<Syntax, Flow> {
         use korben_syntax::reader::Datum;
         match template {
             Template::Literal(form) => Ok(form.clone()),
@@ -840,7 +846,7 @@ impl Interp {
         }
     }
 
-    fn build_items(&mut self, items: &[Template], env: &Env) -> Result<Vec<Syntax>, Flow> {
+    fn build_items(&self, items: &[Template], env: &Env) -> Result<Vec<Syntax>, Flow> {
         let mut built = Vec::with_capacity(items.len());
         for item in items {
             if let Template::Splice(expr) = item {

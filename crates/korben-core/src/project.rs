@@ -254,7 +254,7 @@ impl Session {
             self.diagnostics.push(error);
         }
         let module = self.interp.module(crate::builtins::PRELUDE);
-        let previous = std::mem::replace(&mut self.interp.current, module);
+        let previous = self.interp.current.replace(module);
         let mut diagnostics = Diagnostics::new();
         let remaining = expand_module(&mut self.interp, &forms, &mut diagnostics);
         self.diagnostics.extend(diagnostics);
@@ -265,7 +265,7 @@ impl Session {
                     .at(form.span, format!("found {}", form.describe())),
             );
         }
-        self.interp.current = previous;
+        *self.interp.current.borrow_mut() = previous;
     }
 
     pub fn src_dir(&self) -> PathBuf {
@@ -453,7 +453,7 @@ impl Session {
         }
 
         let runtime = self.interp.module(&name);
-        let previous = std::mem::replace(&mut self.interp.current, runtime.clone());
+        let previous = self.interp.current.replace(runtime.clone());
 
         let mut diagnostics = Diagnostics::new();
         let expanded = expand_module(&mut self.interp, &forms, &mut diagnostics);
@@ -463,7 +463,7 @@ impl Session {
         self.wire_imports(&module, &runtime);
         self.register_items(&module, &runtime);
 
-        self.interp.current = previous;
+        *self.interp.current.borrow_mut() = previous;
         self.loading.pop();
         self.loaded.insert(name.clone());
         self.modules.push(module);
@@ -652,7 +652,7 @@ impl Session {
             }
         }
         // Constants run last: their initializers may call anything above.
-        let previous = std::mem::replace(&mut self.interp.current, runtime.clone());
+        let previous = self.interp.current.replace(runtime.clone());
         for item in &module.items {
             if let Item::Const { name, value, is_public, span, .. } = item {
                 let env = Env::root();
@@ -662,7 +662,7 @@ impl Session {
                 }
             }
         }
-        self.interp.current = previous;
+        *self.interp.current.borrow_mut() = previous;
     }
 
     fn register_type(&mut self, decl: &Rc<crate::ast::TypeDecl>, runtime: &Rc<ModuleRuntime>) {
@@ -754,14 +754,14 @@ impl Session {
                 self.diagnostics.push(error);
             }
             let runtime = self.interp.module(&name);
-            let previous = std::mem::replace(&mut self.interp.current, runtime.clone());
+            let previous = self.interp.current.replace(runtime.clone());
             let mut diagnostics = Diagnostics::new();
             let expanded = expand_module(&mut self.interp, &forms, &mut diagnostics);
             let module = lower_module(file, &name, &expanded, &mut diagnostics);
             self.diagnostics.extend(diagnostics);
             self.wire_imports(&module, &runtime);
             self.register_items(&module, &runtime);
-            self.interp.current = previous;
+            *self.interp.current.borrow_mut() = previous;
             self.loaded.insert(name.clone());
             self.modules.push(module);
             if name == entry {
@@ -792,10 +792,10 @@ impl Session {
     /// The REPL uses this so definitions accumulate across evaluations.
     pub fn declare(&mut self, module: Module) {
         let runtime = self.interp.module(&module.name);
-        let previous = std::mem::replace(&mut self.interp.current, runtime.clone());
+        let previous = self.interp.current.replace(runtime.clone());
         self.wire_imports(&module, &runtime);
         self.register_items(&module, &runtime);
-        self.interp.current = previous;
+        *self.interp.current.borrow_mut() = previous;
         // Replace any earlier version of the same module so `check` sees one copy.
         self.modules.retain(|existing| existing.name != module.name);
         self.modules.push(module);

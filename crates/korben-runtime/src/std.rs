@@ -1253,7 +1253,7 @@ fn now_secs() -> u64 {
 /// output stream, matching how `std.io/eprintln` and `std.io/println` already
 /// divide. That is what lets a supervisor separate failure output from
 /// ordinary output.
-fn log_at(caller: &mut dyn Caller, level: u8, args: &[Value]) -> Outcome {
+fn log_at(caller: &dyn Caller, level: u8, args: &[Value]) -> Outcome {
     if level < threshold() {
         return Ok(Value::Nil);
     }

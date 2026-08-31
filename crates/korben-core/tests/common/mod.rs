@@ -40,7 +40,7 @@ pub fn run(source: &str) -> Run {
 fn run_inner(source: &str) -> Run {
     let mut session = Session::bare(PathBuf::from("."));
     session.interp.max_depth = MAX_DEPTH;
-    session.interp.out = Output::Captured(String::new());
+    session.interp.out.replace(Output::Captured(String::new()));
     let loaded = session.load_text("test", source);
     let mut diagnostics: Vec<String> = session
         .diagnostics
@@ -55,7 +55,7 @@ fn run_inner(source: &str) -> Run {
         if let Ok(runtime) = loaded {
             let main = runtime.globals.borrow().get("main").cloned();
             if let Some(main) = main {
-                session.interp.current = runtime;
+                *session.interp.current.borrow_mut() = runtime;
                 match session.interp.apply(main, Vec::new(), Span::synthetic()) {
                     Ok(result) => value = Some(result.to_string()),
                     Err(flow) => {
@@ -70,7 +70,7 @@ fn run_inner(source: &str) -> Run {
         }
     }
 
-    let output = match std::mem::replace(&mut session.interp.out, Output::Stdout) {
+    let output = match session.interp.out.replace(Output::Stdout) {
         Output::Captured(text) => text,
         Output::Stdout => String::new(),
     };
