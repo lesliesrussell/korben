@@ -594,3 +594,49 @@ fn collect_answers(
         }
     }
 }
+
+// korben-iui
+/// An unknown type name is usually a spelling, not a missing declaration.
+/// `Float` for `Float64` most of all: `Int` is word-sized, so `Float` reads as
+/// though it should be too, and the language has no such name.
+#[test]
+fn an_unknown_type_suggests_the_nearest_one() {
+    let mut session = korben_core::project::Session::bare(std::path::PathBuf::from("."));
+    let _ = session.load_text("t", "(fn f [a: Float] -> Float a)");
+    korben_core::infer::check_session(&mut session, false);
+    let help: Vec<String> = session
+        .diagnostics
+        .items
+        .iter()
+        .filter(|item| item.code.as_deref() == Some("unknown-type"))
+        .flat_map(|item| item.help.clone())
+        .collect();
+    assert!(
+        help.iter().any(|text| text.contains("Float64")),
+        "expected a suggestion of Float64, got {help:?}"
+    );
+}
+
+// korben-iui
+/// `Float32` and `Float64` are the same distance from `Float`, and the type
+/// names live in a set, so without an order the advice could differ between
+/// runs of the same code.
+#[test]
+fn the_suggestion_does_not_change_between_runs() {
+    let suggest = || {
+        let mut session = korben_core::project::Session::bare(std::path::PathBuf::from("."));
+        let _ = session.load_text("t", "(fn f [a: Float] -> Float a)");
+        korben_core::infer::check_session(&mut session, false);
+        session
+            .diagnostics
+            .items
+            .iter()
+            .filter(|item| item.code.as_deref() == Some("unknown-type"))
+            .flat_map(|item| item.help.clone())
+            .collect::<Vec<_>>()
+    };
+    let first = suggest();
+    for _ in 0..8 {
+        assert_eq!(suggest(), first, "the suggestion changed between runs");
+    }
+}

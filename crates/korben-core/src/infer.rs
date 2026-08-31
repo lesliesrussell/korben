@@ -1078,14 +1078,34 @@ impl Checker {
                 }
                 if !self.known_types.contains(&short) {
                     // Unknown names are reported once, then treated as opaque.
-                    self.diagnostics.push(
-                        Diagnostic::warning(format!("unknown type `{name}`"))
-                            .with_code("unknown-type")
-                            .at(*span, "no type with this name is declared")
-                            .help(
-                                "declare it with `(type ...)` or import the module that defines it",
-                            ),
-                    );
+                    // korben-iui
+                    // A near miss is usually a spelling, not a missing
+                    // declaration -- `Float` for `Float64` most of all, since
+                    // `Int` is word-sized and reads as though `Float` should
+                    // be too. Sending that user off to write `(type ...)` is
+                    // the least useful thing to say.
+                    let mut diagnostic = Diagnostic::warning(format!("unknown type `{name}`"))
+                        .with_code("unknown-type")
+                        .at(*span, "no type with this name is declared");
+                    // korben-iui
+                    // `known_types` is a set, so iterating it gives no stable
+                    // order and two candidates the same distance away could be
+                    // suggested on different runs of the same code. Ordered
+                    // here, with the widths the language defaults to first, so
+                    // a tie between `Float32` and `Float64` resolves the way
+                    // an unqualified `Float` was meant.
+                    let mut candidates: Vec<String> = self.known_types.iter().cloned().collect();
+                    candidates.sort();
+                    candidates.sort_by_key(|name| !matches!(name.as_str(), "Int" | "Float64"));
+                    diagnostic = match closest(&short, candidates.into_iter()) {
+                        Some(suggestion) => {
+                            diagnostic.help(format!("did you mean `{suggestion}`?"))
+                        }
+                        None => diagnostic.help(
+                            "declare it with `(type ...)` or import the module that defines it",
+                        ),
+                    };
+                    self.diagnostics.push(diagnostic);
                     self.known_types.insert(short);
                     return Type::Unknown;
                 }
@@ -2352,6 +2372,11 @@ fn collect_used(expr: &Expr, out: &mut HashSet<String>) {
 ///
 /// Only a close miss helps. A suggestion further away than a third of the name
 /// is noise wearing the costume of help, so it is withheld.
+// korben-iui
+/// The nearest candidate by edit distance, or `None` when none is near enough.
+///
+/// The first of two equally near candidates wins, so a caller that cares which
+/// must hand them over in the order it wants them considered.
 fn closest(name: &str, candidates: impl Iterator<Item = String>) -> Option<String> {
     let limit = name.len().div_ceil(3).max(1);
     let mut best: Option<(usize, String)> = None;
