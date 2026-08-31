@@ -314,3 +314,80 @@ fn a_parked_task_nobody_can_satisfy_is_reported() {
     ));
     assert_eq!(result.diagnostics, vec!["channel-deadlock"]);
 }
+
+// ---------------------------------------------------------------- the reactor
+
+// korben-8h8
+/// A task waiting on a socket parks, and the scheduler waits on the socket set
+/// rather than on one socket.
+///
+/// This test hangs against the older behaviour, which is the point. Two tasks
+/// each wait to accept; the client connects to the SECOND listener and refuses
+/// to touch the first until that task has answered it. With a blocking accept
+/// the first task owns the thread, the second never runs, and nothing ever
+/// answers -- so the client waits forever. Parking both and polling the pair
+/// serves them in the order their peers actually arrive.
+///
+/// Verified in both directions: it passes in milliseconds as written, and
+/// `KORBEN_NO_POLL=1` -- which switches the reactor off and restores the older
+/// path -- makes it fail after ten seconds on the client's read timeout, with
+/// the second listener never having answered.
+#[test]
+fn tasks_waiting_on_different_sockets_are_served_as_their_peers_arrive() {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+
+    // Reserve two ports the way the other socket tests do, then let them go.
+    let port = |()| {
+        let probe = TcpListener::bind("127.0.0.1:0").expect("bind");
+        probe.local_addr().expect("addr").port()
+    };
+    let (first, second) = (port(()), port(()));
+
+    let client = std::thread::spawn(move || {
+        // Talk to the second listener first, and wait for its answer before
+        // going anywhere near the first.
+        let mut early = loop {
+            if let Ok(stream) = TcpStream::connect(("127.0.0.1", second)) {
+                break stream;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        let mut answer = String::new();
+        early.set_read_timeout(Some(std::time::Duration::from_secs(10))).expect("timeout");
+        let _ = early.read_to_string(&mut answer);
+        let _ = early.write_all(b"");
+        let mut late = TcpStream::connect(("127.0.0.1", first)).expect("connect first");
+        let mut second_answer = String::new();
+        late.set_read_timeout(Some(std::time::Duration::from_secs(10))).expect("timeout");
+        let _ = late.read_to_string(&mut second_answer);
+        (answer, second_answer)
+    });
+
+    let result = run(&format!(
+        "(module m (use std.async :as task) (use std.net :as net))
+(async fn serve [address: String name: String] -> String !async !io
+  (match (net.listen address)
+    (Err _) \"listen failed\"
+    (Ok listener)
+      (match (listener.accept)
+        (Err _) (do (listener.close) \"accept failed\")
+        (Ok connection)
+          (do (connection.write name)
+              (connection.close)
+              (listener.close)
+              name))))
+(pub fn main [] -> Unit !io !async
+  (task-scope scope
+    (let a (spawn scope (serve \"127.0.0.1:{first}\" \"first\")))
+    (let b (spawn scope (serve \"127.0.0.1:{second}\" \"second\")))
+    (println (await b))
+    (println (await a))))"
+    ));
+
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert_eq!(result.output, "second\nfirst\n");
+    let (early, late) = client.join().expect("client thread");
+    assert_eq!(early, "second", "the second listener answered first");
+    assert_eq!(late, "first");
+}

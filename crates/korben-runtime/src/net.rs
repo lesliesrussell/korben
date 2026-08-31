@@ -64,6 +64,12 @@ impl Wire {
         }
     }
 
+    // korben-8h8
+    /// The descriptor to park a waiting task on, when there is a reactor.
+    fn descriptor(&self) -> Option<Descriptor> {
+        descriptor_of(self.socket())
+    }
+
     /// Whether reads on this wire may return before they have an answer.
     fn can_yield(&self) -> bool {
         matches!(self, Wire::Plain(_))
@@ -291,7 +297,23 @@ pub fn accept(caller: &dyn Caller, value: &Value, loc: Loc) -> Outcome {
             Ok((stream, _)) => return Ok(Value::ok(connection_value(stream))),
             Err(error) if error.kind() == ErrorKind::Interrupted => {}
             Err(error) if error.kind() == ErrorKind::WouldBlock && !waiting => {
-                waiting = matches!(yield_or_wait(caller)?, Step::Wait);
+                // korben-8h8: the descriptor is taken under a short borrow and
+                // the handle released before parking, because parking runs
+                // other Korben code and that code may reach this listener.
+                let fd = {
+                    let borrowed = handle.borrow();
+                    let Some(listener) = borrowed.as_ref() else {
+                        return Ok(closed("this listener"));
+                    };
+                    descriptor_of(listener)
+                };
+                match park_socket(fd, Interest::Readable) {
+                    Parked::Resumed => {}
+                    Parked::ShuttingDown => return Ok(shutting_down()),
+                    Parked::NotATask => {
+                        waiting = matches!(yield_or_wait(caller)?, Step::Wait);
+                    }
+                }
             }
             Err(error) => return Ok(Value::err(crate::std::io_error("", &error))),
         }
@@ -344,7 +366,21 @@ pub fn read(caller: &dyn Caller, value: &Value, loc: Loc) -> Outcome {
             }
             Err(error) if error.kind() == ErrorKind::Interrupted => {}
             Err(error) if error.kind() == ErrorKind::WouldBlock && !waiting => {
-                waiting = matches!(yield_or_wait(caller)?, Step::Wait);
+                // korben-8h8
+                let fd = {
+                    let borrowed = handle.borrow();
+                    let Some(stream) = borrowed.as_ref() else {
+                        return Ok(closed("this connection"));
+                    };
+                    stream.descriptor()
+                };
+                match park_socket(fd, Interest::Readable) {
+                    Parked::Resumed => {}
+                    Parked::ShuttingDown => return Ok(shutting_down()),
+                    Parked::NotATask => {
+                        waiting = matches!(yield_or_wait(caller)?, Step::Wait);
+                    }
+                }
             }
             Err(error) => return Ok(Value::err(crate::std::io_error("", &error))),
         }
@@ -382,7 +418,21 @@ pub fn write(caller: &dyn Caller, value: &Value, text: &str, loc: Loc) -> Outcom
             }
             Err(error) if error.kind() == ErrorKind::Interrupted => {}
             Err(error) if error.kind() == ErrorKind::WouldBlock && !waiting => {
-                waiting = matches!(yield_or_wait(caller)?, Step::Wait);
+                // korben-8h8
+                let fd = {
+                    let borrowed = handle.borrow();
+                    let Some(stream) = borrowed.as_ref() else {
+                        return Ok(closed("this connection"));
+                    };
+                    stream.descriptor()
+                };
+                match park_socket(fd, Interest::Writable) {
+                    Parked::Resumed => {}
+                    Parked::ShuttingDown => return Ok(shutting_down()),
+                    Parked::NotATask => {
+                        waiting = matches!(yield_or_wait(caller)?, Step::Wait);
+                    }
+                }
             }
             Err(error) => return Ok(Value::err(crate::std::io_error("", &error))),
         }
@@ -457,6 +507,19 @@ type NfdsT = std::os::raw::c_ulong;
 #[cfg(unix)]
 const POLLIN: std::os::raw::c_short = 0x0001;
 
+// korben-8h8
+/// There is room to send. `write` blocks when the send buffer fills, so a
+/// reactor that only watched for readable would never wake a task waiting on
+/// one.
+#[cfg(unix)]
+const POLLOUT: std::os::raw::c_short = 0x0004;
+
+/// Reported whether or not they were asked for.
+#[cfg(unix)]
+const POLLERR: std::os::raw::c_short = 0x0008;
+#[cfg(unix)]
+const POLLHUP: std::os::raw::c_short = 0x0010;
+
 #[cfg(unix)]
 extern "C" {
     fn poll(fds: *mut PollFd, nfds: NfdsT, timeout: std::os::raw::c_int) -> std::os::raw::c_int;
@@ -467,11 +530,28 @@ extern "C" {
 /// A negative timeout waits indefinitely, which is what an idle server wants.
 #[cfg(unix)]
 fn readable(fds: &[std::os::raw::c_int], timeout_ms: i32) -> std::io::Result<Vec<bool>> {
+    let events = vec![POLLIN; fds.len()];
+    ready_for(fds, &events, timeout_ms)
+}
+
+// korben-8h8
+/// The same wait, with an event mask per descriptor rather than one for all of
+/// them. The reactor needs that: one task may be waiting to read while another
+/// waits to write.
+#[cfg(unix)]
+fn ready_for(
+    fds: &[std::os::raw::c_int],
+    events: &[std::os::raw::c_short],
+    timeout_ms: i32,
+) -> std::io::Result<Vec<bool>> {
     if fds.is_empty() {
         return Ok(Vec::new());
     }
-    let mut polled: Vec<PollFd> =
-        fds.iter().map(|fd| PollFd { fd: *fd, events: POLLIN, revents: 0 }).collect();
+    let mut polled: Vec<PollFd> = fds
+        .iter()
+        .zip(events.iter())
+        .map(|(fd, events)| PollFd { fd: *fd, events: *events, revents: 0 })
+        .collect();
     loop {
         // SAFETY: `polled` is a valid, correctly sized array of `pollfd` for
         // the length passed alongside it, and it outlives the call.
@@ -492,7 +572,14 @@ fn readable(fds: &[std::os::raw::c_int], timeout_ms: i32) -> std::io::Result<Vec
             }
             return Err(error);
         }
-        return Ok(polled.iter().map(|entry| entry.revents & POLLIN != 0).collect());
+        // `revents` also reports errors and hangups the caller never asked
+        // for. Those mean the descriptor will not block either, so they count
+        // as ready: the operation itself is what should report the failure.
+        return Ok(polled
+            .iter()
+            .zip(events.iter())
+            .map(|(entry, asked)| entry.revents & (asked | POLLERR | POLLHUP) != 0)
+            .collect());
     }
 }
 
@@ -502,6 +589,136 @@ fn readable(_fds: &[std::os::raw::c_int], _timeout_ms: i32) -> std::io::Result<V
         ErrorKind::Unsupported,
         "waiting on several sockets at once is only supported on Unix",
     ))
+}
+
+// ------------------------------------------------------------------ reactor
+
+// korben-8h8
+/// What a task parked on a socket is waiting for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Interest {
+    Readable,
+    Writable,
+}
+
+/// What happened when an operation tried to park on its socket.
+pub(crate) enum Parked {
+    /// The task parked and has been resumed; try the socket again.
+    Resumed,
+    /// Not running inside a task, so there is no stack to park.
+    NotATask,
+    /// A shutdown was requested while waiting. The operation should give up
+    /// rather than resume, so the program can exit.
+    ShuttingDown,
+}
+
+thread_local! {
+    /// The sockets parked tasks are waiting on. The scheduler polls exactly
+    /// this set when it has nothing else to run.
+    static WAITING: RefCell<Vec<(Descriptor, Interest)>> = const { RefCell::new(Vec::new()) };
+}
+
+// korben-8h8
+/// What `poll` is given: a descriptor on Unix, and nothing anywhere else.
+#[cfg(unix)]
+pub(crate) type Descriptor = std::os::raw::c_int;
+#[cfg(not(unix))]
+pub(crate) type Descriptor = std::os::raw::c_int;
+
+/// The descriptor behind a socket, when there is a reactor to give it to.
+///
+/// `None` means "do not park on this": either the platform has no `poll`, or
+/// it was switched off. Both fall back to the older behaviour rather than
+/// failing.
+#[cfg(unix)]
+pub(crate) fn descriptor_of<T: std::os::unix::io::AsRawFd>(socket: &T) -> Option<Descriptor> {
+    polling().then(|| socket.as_raw_fd())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn descriptor_of<T>(_socket: &T) -> Option<Descriptor> {
+    None
+}
+
+// korben-8h8
+/// Park the task waiting on `fd` until it is ready.
+///
+/// Registering before parking is what makes this different from an ordinary
+/// suspend. A task parked on a channel is waiting for another task, and the
+/// scheduler can tell whether one exists. A task parked on a socket is waiting
+/// for a peer, which the scheduler cannot see at all -- so it has to be told
+/// which descriptor would wake it, or it would call the wait a deadlock.
+///
+/// The caller must not be holding the socket's handle: parking runs other
+/// Korben code, and that code may reach this very socket.
+pub(crate) fn park_on(fd: Descriptor, interest: Interest) -> Parked {
+    WAITING.with(|waiting| waiting.borrow_mut().push((fd, interest)));
+    let parked = crate::task::park_now();
+    WAITING.with(|waiting| {
+        let mut waiting = waiting.borrow_mut();
+        if let Some(at) = waiting.iter().position(|entry| *entry == (fd, interest)) {
+            waiting.remove(at);
+        }
+    });
+    if !parked {
+        return Parked::NotATask;
+    }
+    if crate::signal::requested() {
+        return Parked::ShuttingDown;
+    }
+    Parked::Resumed
+}
+
+// korben-8h8
+/// Park on `fd` if there is one to park on.
+fn park_socket(fd: Option<Descriptor>, interest: Interest) -> Parked {
+    match fd {
+        Some(fd) => park_on(fd, interest),
+        None => Parked::NotATask,
+    }
+}
+
+/// What a socket operation returns when a shutdown arrives while it waits.
+/// Reported as an ordinary I/O failure, so Korben code handles it the way it
+/// handles any other, rather than the scheduler calling it a deadlock.
+fn shutting_down() -> Value {
+    Value::err(crate::std::io_error("", &std::io::Error::from(ErrorKind::Interrupted)))
+}
+
+// korben-8h8
+/// Block until one of the sockets parked tasks are waiting on can move.
+///
+/// The scheduler calls this once it has established that no task can run. It
+/// is the difference between "nothing can happen" and "nothing can happen
+/// *here*": with a registered socket, waiting is the right answer and calling
+/// it a deadlock would be wrong.
+pub(crate) fn wait_for_readiness() -> bool {
+    let waiting: Vec<(Descriptor, Interest)> = WAITING.with(|waiting| waiting.borrow().clone());
+    if waiting.is_empty() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        let fds: Vec<Descriptor> = waiting.iter().map(|entry| entry.0).collect();
+        let events: Vec<std::os::raw::c_short> = waiting
+            .iter()
+            .map(|entry| match entry.1 {
+                Interest::Readable => POLLIN,
+                Interest::Writable => POLLOUT,
+            })
+            .collect();
+        match ready_for(&fds, &events, -1) {
+            // A shutdown counts as something happening: the parked tasks are
+            // resumed so they can give up through their own code paths rather
+            // than being reported as stuck.
+            Ok(ready) => ready.iter().any(|flag| *flag) || crate::signal::requested(),
+            Err(_) => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
 }
 
 // ------------------------------------------------------------------ pools
