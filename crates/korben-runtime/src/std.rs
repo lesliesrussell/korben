@@ -27,6 +27,12 @@ fn native(name: &str, arity: usize, func: crate::value::NativeFn) -> Value {
     Value::native(name, params, func)
 }
 
+// korben-6nt
+/// What a narrowing accessor answers when the JSON is a different shape.
+fn not_json(expected: &str, got: &Value) -> Value {
+    Value::err(Value::str(format!("expected {expected}, found {}", got.type_name())))
+}
+
 fn wrong_type(name: &str, expected: &str, got: &Value, loc: Loc) -> Flow {
     Flow::fault(
         Fault::new("type-error", format!("`{name}` expected {expected}"), loc)
@@ -277,6 +283,15 @@ pub const NAMES: &[&str] = &[
     "std.json/encode",
     "std.json/encode-pretty",
     "std.json/decode",
+    // korben-6nt
+    "std.json/object",
+    "std.json/array",
+    "std.json/string",
+    "std.json/int",
+    "std.json/float",
+    "std.json/bool",
+    "std.json/field",
+    "std.json/null?",
     // std.log
     "std.log/debug",
     "std.log/info",
@@ -1055,6 +1070,66 @@ pub fn builtin(name: &str) -> Option<Value> {
             Ok(match crate::json::decode(&text) {
                 Ok(value) => Value::ok(value),
                 Err(message) => Value::err(Value::str(message)),
+            })
+        }),
+
+        // korben-6nt
+        // Narrowing a decoded value. Each answers `Err` rather than faulting:
+        // the shape of someone else's JSON is a thing to handle, not a bug in
+        // the program reading it.
+        "std.json/object" => native("object", 1, |_, args, _| {
+            Ok(match &args[0] {
+                value @ Value::Map(_) => Value::ok(value.clone()),
+                other => not_json("an object", other),
+            })
+        }),
+        "std.json/array" => native("array", 1, |_, args, _| {
+            Ok(match &args[0] {
+                value @ Value::Vector(_) => Value::ok(value.clone()),
+                other => not_json("an array", other),
+            })
+        }),
+        "std.json/string" => native("string", 1, |_, args, _| {
+            Ok(match &args[0] {
+                value @ Value::Str(_) => Value::ok(value.clone()),
+                other => not_json("a string", other),
+            })
+        }),
+        "std.json/int" => native("int", 1, |_, args, _| {
+            Ok(match &args[0] {
+                value @ Value::Int(_) => Value::ok(value.clone()),
+                other => not_json("an integer", other),
+            })
+        }),
+        "std.json/float" => native("float", 1, |_, args, _| {
+            Ok(match &args[0] {
+                // JSON has one number type, so a whole number decodes as an
+                // `Int` and asking for a float should still answer.
+                Value::Int(number) => Value::ok(Value::Float(*number as f64)),
+                value @ Value::Float(_) => Value::ok(value.clone()),
+                other => not_json("a number", other),
+            })
+        }),
+        "std.json/bool" => native("bool", 1, |_, args, _| {
+            Ok(match &args[0] {
+                value @ Value::Bool(_) => Value::ok(value.clone()),
+                other => not_json("a boolean", other),
+            })
+        }),
+        "std.json/null?" => {
+            native("null?", 1, |_, args, _| Ok(Value::Bool(matches!(&args[0], Value::Nil))))
+        }
+        // Decoding turns object keys into keywords, so reaching for one with
+        // the string JSON actually spells silently misses through `get`. This
+        // takes the name as written.
+        "std.json/field" => native("field", 2, |_, args, loc| {
+            let name = as_string("json.field", &args[1], loc)?;
+            let Value::Map(map) = &args[0] else {
+                return Ok(not_json("an object", &args[0]));
+            };
+            Ok(match map.get(&Value::keyword(&name)) {
+                Some(value) => Value::ok(value.clone()),
+                None => Value::err(Value::str(format!("no field `{name}`"))),
             })
         }),
 
