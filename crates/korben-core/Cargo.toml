@@ -7,4 +7,7 @@ description = "Korben expander, type checker, evaluator, and standard library"
 
 [dependencies]
 korben-syntax.workspace = true
-korben-runtime.workspace = true
+# korben-ggd: the toolchain itself can speak TLS, so `korben run` can fetch
+# https. This is a dependency of the compiler, not of a compiled program --
+# what a generated project gets is decided when its manifest is written.
+korben-runtime = { workspace = true, features = ["tls"] }

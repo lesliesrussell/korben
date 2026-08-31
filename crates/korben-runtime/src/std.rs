@@ -241,6 +241,8 @@ pub const NAMES: &[&str] = &[
     // std.net: blocking TCP
     "std.net/listen",
     "std.net/connect",
+    // korben-ggd
+    "std.net/connect-tls",
     // korben-ae2
     "std.net/pool",
     "Pool/wait",
@@ -976,6 +978,11 @@ pub fn builtin(name: &str) -> Option<Value> {
 
         "std.net/listen" => native("listen", 1, |_, args, loc| {
             crate::net::listen(&as_string("net.listen", &args[0], loc)?)
+        }),
+        // korben-ggd
+        "std.net/connect-tls" => native("connect-tls", 1, |_, args, loc| {
+            let address = as_string("net.connect-tls", &args[0], loc)?;
+            crate::net::connect_tls(&address)
         }),
         "std.net/connect" => native("connect", 1, |_, args, loc| {
             crate::net::connect(&as_string("net.connect", &args[0], loc)?)

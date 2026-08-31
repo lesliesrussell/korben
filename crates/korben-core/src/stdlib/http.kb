@@ -308,14 +308,18 @@
   (match (string.split-once url "://")
     (None) (Err (Unsupported (str "no scheme in " url)))
     (Some scheme-and-rest)
-      (if (not= (get scheme-and-rest 0 "") "http")
-        (Err (Unsupported "only http:// is supported"))
-        (match (string.split-once (get scheme-and-rest 1 "") "/")
-          (None) (Ok [(get scheme-and-rest 1 "") "/"])
-          (Some parts) (Ok [(get parts 0 "") (str "/" (get parts 1 ""))])))))
+      (do
+        (let scheme (get scheme-and-rest 0 ""))
+        (if (and (not= scheme "http") (not= scheme "https"))
+          (Err (Unsupported (str "only http:// and https:// are supported, not " scheme "://")))
+          (match (string.split-once (get scheme-and-rest 1 "") "/")
+            (None) (Ok [(get scheme-and-rest 1 "") "/" scheme])
+            (Some parts) (Ok [(get parts 0 "") (str "/" (get parts 1 "")) scheme]))))))
 
-(fn with-port [authority: String] -> String
-  (if (contains? authority ":") authority (str authority ":80")))
+(fn with-port [authority: String scheme: String] -> String
+  (if (contains? authority ":")
+    authority
+    (str authority (if (= scheme "https") ":443" ":80"))))
 
 (fn read-all [connection: Borrow Connection collected: String] -> String !io
   (match (connection.read)
@@ -346,7 +350,13 @@
       (do
         (let authority (get parts 0 ""))
         (let target (get parts 1 "/"))
-        (match (net.connect (with-port authority))
+        (let scheme (get parts 2 "http"))
+        (let address (with-port authority scheme))
+        ;; korben-ggd
+        ;; https:// dials through TLS. The certificate is checked against the
+        ;; host in the URL, so a name that does not match is a failure here
+        ;; rather than a surprise later.
+        (match (if (= scheme "https") (net.connect-tls address) (net.connect address))
           (Err error) (Err (Transport (str error)))
           (Ok connection)
             (with open connection

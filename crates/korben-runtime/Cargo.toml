@@ -6,3 +6,15 @@ license.workspace = true
 description = "The Korben runtime: values, operations, and the standard library, shared by the interpreter and generated native code"
 
 [dependencies]
+# korben-ggd
+# TLS is optional and off by default. korben-runtime's source is written into
+# every generated project, so a dependency here is one every korben program
+# would inherit -- and `korben build` is offline, while fetching a crate is
+# not. A program that speaks https:// opts in and accepts that; one that does
+# not stays as it was.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+webpki-roots = { version = "1", optional = true }
+
+[features]
+default = []
+tls = ["dep:rustls", "dep:webpki-roots"]
