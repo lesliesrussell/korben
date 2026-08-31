@@ -393,6 +393,14 @@ fn settle(task: &Rc<TaskCell>, outcome: Outcome) -> Outcome {
     }
 }
 
+// korben-8h8
+/// Park the current task, with no fallback. `net` calls this once it has
+/// registered the descriptor that will wake the task, so there is nothing to
+/// decide here.
+pub(crate) fn park_now() -> bool {
+    park()
+}
+
 // korben-5wu
 /// Wait for something else to change, from an operation that would block.
 ///
@@ -437,7 +445,19 @@ fn drive_a_round() -> bool {
             return true;
         }
     }
-    progress() != before
+    if progress() != before {
+        return true;
+    }
+    // korben-8h8
+    // No task can move. That is only a deadlock if nothing outside the
+    // scheduler can move either -- and a task parked on a socket is waiting
+    // for a peer, which the scheduler cannot see. Ask the sockets before
+    // concluding anything.
+    if crate::net::wait_for_readiness() {
+        note_progress();
+        return true;
+    }
+    false
 }
 
 // korben-5wu
