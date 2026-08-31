@@ -802,7 +802,13 @@ fn free_port() -> u16 {
     port
 }
 
+// korben-92b
 /// Send one request and read the whole response.
+///
+/// Reading to end-of-file only finishes once the server closes, and the server
+/// now keeps a connection open unless asked not to, so these requests say
+/// `connection: close`. `a_connection_is_reused_across_requests` covers the
+/// other half.
 fn request(port: u16, raw: &str) -> String {
     use std::io::{Read, Write};
     // The server needs a moment to bind, so connecting is retried briefly.
@@ -871,24 +877,113 @@ fn the_http_server_answers_a_real_client() {
         .spawn()
         .expect("start the server");
 
-    let health = request(port, "GET /health HTTP/1.1\r\nhost: localhost\r\n\r\n");
+    let health =
+        request(port, "GET /health HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n");
     assert!(health.starts_with("HTTP/1.1 200 OK\r\n"), "{health:?}");
     assert!(health.contains("content-length: 2\r\n"), "{health:?}");
     assert!(health.ends_with("\r\n\r\nok"), "{health:?}");
 
-    let greeting = request(port, "GET /greeting?name=Ada HTTP/1.1\r\nhost: localhost\r\n\r\n");
+    let greeting = request(
+        port,
+        "GET /greeting?name=Ada HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n",
+    );
     assert!(greeting.contains("content-type: application/json"), "{greeting:?}");
     assert!(greeting.ends_with("{\"message\":\"Ada\"}"), "{greeting:?}");
 
     // A body is read using `content-length`, not guessed at.
     let echo = request(
         port,
-        "POST /echo HTTP/1.1\r\nhost: localhost\r\ncontent-length: 11\r\n\r\nhello there",
+        "POST /echo HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\ncontent-length: 11\r\n\r\nhello there",
     );
     assert!(echo.ends_with("\r\n\r\nhello there"), "{echo:?}");
 
-    let missing = request(port, "GET /nowhere HTTP/1.1\r\nhost: localhost\r\n\r\n");
+    let missing =
+        request(port, "GET /nowhere HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n");
     assert!(missing.starts_with("HTTP/1.1 404 Not Found\r\n"), "{missing:?}");
+
+    let _ = server.kill();
+    let _ = server.wait();
+}
+
+// korben-92b
+/// Two requests, one socket. Answering used to close the connection every
+/// time, so a client paid for a new one per request -- and a load generator
+/// could exhaust its own ephemeral ports before the server broke a sweat.
+#[test]
+fn a_connection_is_reused_across_requests() {
+    use std::io::{Read, Write};
+
+    let scratch = Scratch::new("keepalive");
+    assert!(korben(scratch.path(), &["new", "app"]).status.success());
+    let project = scratch.path().join("app");
+    std::fs::remove_file(project.join("tests/main_test.kb")).unwrap();
+    let port = free_port();
+    std::fs::write(
+        project.join("src/main.kb"),
+        format!(
+            r#"(module main
+  (use std.http :as http))
+
+(pub fn handle [request: http.Request] -> http.Response
+  (match request
+    {{:method :get :path "/health"}} (http.text 200 "ok")
+    _ (http.not-found)))
+
+(pub fn main [] -> Unit !io
+  (match (http.serve "127.0.0.1:{port}" handle)
+    (Ok _) nil
+    (Err error) (println "server stopped:" (http.describe error))))
+"#
+        ),
+    )
+    .unwrap();
+
+    let mut server = Command::new(EXE)
+        .arg("run")
+        .current_dir(&project)
+        .env("NO_COLOR", "1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("start the server");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut stream = loop {
+        match std::net::TcpStream::connect(("127.0.0.1", port)) {
+            Ok(stream) => break stream,
+            Err(error) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                let _ = error;
+            }
+            Err(error) => panic!("could not reach the server on {port}: {error}"),
+        }
+    };
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+
+    // Two requests down the same socket, each read by its content-length
+    // rather than by waiting for a close that should not come.
+    for attempt in 0..2 {
+        stream.write_all(b"GET /health HTTP/1.1\r\nhost: localhost\r\n\r\n").expect("write");
+        stream.flush().expect("flush");
+
+        let mut seen = Vec::new();
+        let mut byte = [0u8; 1];
+        // Read the head, then exactly the two bytes of "ok".
+        while !seen.ends_with(b"\r\n\r\n") {
+            let read = stream.read(&mut byte).expect("read the head");
+            assert!(read == 1, "the server closed during request {attempt}");
+            seen.push(byte[0]);
+        }
+        let head = String::from_utf8(seen).expect("utf-8");
+        assert!(head.starts_with("HTTP/1.1 200 OK\r\n"), "request {attempt}: {head:?}");
+        assert!(
+            head.contains("connection: keep-alive\r\n"),
+            "request {attempt} should be told the connection stays open: {head:?}"
+        );
+        let mut body = [0u8; 2];
+        stream.read_exact(&mut body).expect("read the body");
+        assert_eq!(&body, b"ok", "request {attempt}");
+    }
 
     let _ = server.kill();
     let _ = server.wait();
