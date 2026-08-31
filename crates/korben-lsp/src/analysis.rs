@@ -77,8 +77,10 @@ impl Analysis {
             session.set_overlay(path.clone(), text.clone());
         }
         load_workspace(&mut session, overlay);
-        let chart = korben_core::infer::chart_session(&session);
+        // korben-vok: check first, then read what it concluded. This used to
+        // be two full inference passes over the workspace per analysis.
         korben_core::infer::check_session(&mut session, false);
+        let chart = korben_core::infer::chart_session(&session);
         let lints = korben_core::infer::lint_session(&session);
         session.diagnostics.extend(lints);
         Analysis { session, chart }

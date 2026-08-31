@@ -498,3 +498,99 @@ fn an_overloaded_builtin_is_left_untyped() {
     assert!(check(r#"(fn f [v: Vec String] -> String (get v 0 "d"))"#).is_empty());
     assert!(check(r#"(fn f [m: Map String Int] -> Int (get m "k" 0))"#).is_empty());
 }
+
+// korben-vok
+/// Inference used to be run and discarded. What it concluded is now kept on
+/// the session, which is what lets anything downstream ask for a type instead
+/// of running inference again and risking a different answer.
+#[test]
+fn the_checker_keeps_what_it_concluded() {
+    let source = r#"(fn f [n: Int] -> String
+                      (let doubled (* n 2))
+                      (let label "count")
+                      label)"#;
+    let mut session = korben_core::project::Session::bare(std::path::PathBuf::from("."));
+    let _ = session.load_text("t", source);
+    korben_core::infer::check_session(&mut session, false);
+    assert!(session.diagnostics.items.iter().all(
+        |item| item.code.is_none() || !matches!(item.severity, korben_syntax::Severity::Error)
+    ));
+
+    // Every expression in the source is charted, and the types are the ones a
+    // reader would expect rather than unresolved variables.
+    let charted: Vec<String> = session.types.values().map(|ty| ty.to_string()).collect();
+    assert!(!charted.is_empty(), "nothing was recorded");
+    assert!(charted.iter().any(|ty| ty == "Int"), "the arithmetic should be Int: {charted:?}");
+    assert!(charted.iter().any(|ty| ty == "String"), "the label should be String: {charted:?}");
+}
+
+// korben-vok
+/// A type only settled by a later constraint must be recorded settled, not as
+/// the variable it was when the expression was first walked.
+#[test]
+fn a_type_learned_later_is_recorded_resolved() {
+    // `x` has no annotation; it is only pinned to Int by the call below it.
+    let source = r#"(fn takes-int [n: Int] -> Int n)
+                    (fn f [] -> Int
+                      (let x 1)
+                      (takes-int x))"#;
+    let mut session = korben_core::project::Session::bare(std::path::PathBuf::from("."));
+    let _ = session.load_text("t", source);
+    korben_core::infer::check_session(&mut session, false);
+
+    let charted: Vec<String> = session.types.values().map(|ty| ty.to_string()).collect();
+    assert!(
+        !charted.iter().any(|ty| ty.starts_with('?') || ty == "_"),
+        "an unresolved variable was recorded: {charted:?}"
+    );
+}
+
+// korben-vok
+/// The chart is only useful to the code generator if the spans it is keyed by
+/// survive lowering. If they did not, `type_of` would answer `None` for
+/// everything and the whole thing would be an expensive no-op.
+#[test]
+fn the_lowered_program_can_be_asked_for_a_type() {
+    let source = r#"(fn f [n: Int] -> Int
+                      (let doubled (* n 2))
+                      doubled)
+                    (fn main [] -> Unit !io (println (f 21)))"#;
+    let mut session = korben_core::project::Session::bare(std::path::PathBuf::from("."));
+    let _ = session.load_text("t", source);
+    korben_core::infer::check_session(&mut session, false);
+    let program = korben_core::ir::lower_session(&session, "t").expect("lowering");
+
+    assert!(!program.types.is_empty(), "the program carried no types");
+
+    // Walk the lowered functions and ask about the spans they actually hold.
+    // At least some must answer, or the spans did not survive.
+    let mut answered = Vec::new();
+    for module in &program.modules {
+        for function in &module.functions {
+            collect_answers(&function.body, &program, &mut answered);
+        }
+    }
+    assert!(
+        answered.iter().any(|ty| ty == "Int"),
+        "no lowered expression could be asked its type: {answered:?}"
+    );
+}
+
+#[cfg(test)]
+fn collect_answers(
+    block: &korben_core::ir::Block,
+    program: &korben_core::ir::Program,
+    out: &mut Vec<String>,
+) {
+    use korben_core::ir::Stmt;
+    for statement in &block.stmts {
+        let expr = match statement {
+            Stmt::Let { value, .. } | Stmt::Var { value, .. } => value,
+            Stmt::Expr(expr) => expr,
+            Stmt::Defer { .. } => continue,
+        };
+        if let Some(ty) = program.type_of(expr.span()) {
+            out.push(ty.to_string());
+        }
+    }
+}

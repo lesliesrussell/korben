@@ -24,6 +24,27 @@ pub struct Program {
     pub entry: Option<String>,
     /// Runtime builtins the program actually references.
     pub builtins: Vec<String>,
+    // korben-vok
+    /// What the checker concluded about each expression, keyed by span.
+    ///
+    /// Every `Expr` here already carries the span it was lowered from, and the
+    /// checker keys its conclusions the same way, so the two meet without
+    /// annotating each node. An expression the compiler synthesised -- from a
+    /// macro, or from desugaring -- has no entry, and `type_of` answers `None`
+    /// for it rather than guessing.
+    pub types: std::collections::HashMap<Span, crate::types::Type>,
+}
+
+impl Program {
+    // korben-vok
+    /// What the checker concluded about the expression at `span`.
+    ///
+    /// `None` means the checker reached no conclusion worth recording, or the
+    /// expression was synthesised rather than written. A caller that wants to
+    /// specialise on a type has to be prepared for that and stay general.
+    pub fn type_of(&self, span: Span) -> Option<&crate::types::Type> {
+        self.types.get(&span)
+    }
 }
 
 pub struct Module {
@@ -257,6 +278,52 @@ pub enum Expr {
     Quote(crate::value::Value, Span),
 }
 
+impl Expr {
+    // korben-vok
+    /// Where this expression came from.
+    ///
+    /// The checker keys what it concluded by span, so this is how a lowered
+    /// expression is matched back to its type. Every variant carries one
+    /// already; this only reaches for it.
+    pub fn span(&self) -> Span {
+        match self {
+            Expr::Nil(span)
+            | Expr::Bool(_, span)
+            | Expr::Int(_, span)
+            | Expr::Float(_, span)
+            | Expr::Str(_, span)
+            | Expr::Keyword(_, span)
+            | Expr::Symbol(_, span)
+            | Expr::Ref(_, span)
+            | Expr::Vector(_, span)
+            | Expr::Map(_, span)
+            | Expr::Set(_, span)
+            | Expr::Concat(_, span)
+            | Expr::And(_, span)
+            | Expr::Or(_, span)
+            | Expr::Do(_, span)
+            | Expr::Lambda(_, span)
+            | Expr::Recur(_, span)
+            | Expr::Propagate(_, span)
+            | Expr::Throw(_, span)
+            | Expr::Unsafe(_, span)
+            | Expr::Await(_, span)
+            | Expr::Quote(_, span) => *span,
+            Expr::Record { span, .. }
+            | Expr::If { span, .. }
+            | Expr::Call { span, .. }
+            | Expr::Field { span, .. }
+            | Expr::Match { span, .. }
+            | Expr::Loop { span, .. }
+            | Expr::Assign { span, .. }
+            | Expr::Try { span, .. }
+            | Expr::With { span, .. }
+            | Expr::TaskScope { span, .. }
+            | Expr::Spawn { span, .. } => *span,
+        }
+    }
+}
+
 pub struct Lambda {
     pub name: String,
     pub params: Vec<Param>,
@@ -432,7 +499,8 @@ pub fn lower_session(session: &Session, entry_module: &str) -> Result<Program, V
         .map(|_| global_symbol(entry_module, "main"));
     let mut builtins: Vec<String> = lowerer.builtins.into_iter().collect();
     builtins.sort();
-    Ok(Program { modules, entry, builtins })
+    // korben-vok: the checker's conclusions travel with the program.
+    Ok(Program { modules, entry, builtins, types: session.types.clone() })
 }
 
 use korben_syntax::diag::Diagnostic;
