@@ -533,12 +533,25 @@ impl Generator {
         for param in &function.params {
             let default = match &param.default {
                 Some(default) => {
-                    // A default is ordinary code and may fail.
+                    // A default is ordinary code and may fail, so it is given a
+                    // label to break out to.
                     let label = self.label();
                     self.error_labels.push(label.clone());
                     let expr = self.expr(default);
                     self.error_labels.pop();
-                    format!("match ({label}: {{ Ok({expr}) }}) {{ Ok(v) => v, Err(e) => return Err(e) }}")
+                    // korben-ajx
+                    // Most defaults cannot fail -- `{}`, `""`, a number -- and
+                    // nothing breaks to the label. Wrapping those in a labelled
+                    // block anyway makes rustc warn about an unused label and a
+                    // redundant paren, in a file nobody wrote. The label is kept
+                    // only when the default actually reaches for it.
+                    if expr.contains(&format!("break {label} ")) {
+                        format!(
+                            "match ({label}: {{ Ok({expr}) }}) {{ Ok(v) => v, Err(e) => return Err(e) }}"
+                        )
+                    } else {
+                        expr
+                    }
                 }
                 None => "Value::Nil".to_string(),
             };

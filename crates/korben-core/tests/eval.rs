@@ -414,3 +414,51 @@ fn renaming_something_absent_reports_a_failure() {
     // A rename that cannot happen must say so rather than report success.
     assert_eq!(result.output.trim_end(), "failed");
 }
+
+// korben-ajx
+/// `test-request` is how a handler is exercised without a socket. It used to
+/// take only a method and a path, so it always built an empty body -- and no
+/// POST, PUT or PATCH handler could be tested at all, which is the part of a
+/// service most worth testing.
+#[test]
+fn a_test_request_can_carry_a_body_and_headers() {
+    let result = run(r#"(module m (use std.http :as http))
+           (fn handle [request: http.Request] -> http.Response
+             (match request
+               {:method :get :path "/health"} (http.text 200 "ok")
+               {:method :post :path "/echo"} (http.text 200 request.body)
+               _ (http.not-found)))
+           (fn main [] -> Unit !io
+             ;; The original form still means what it did.
+             (println (handle (http.test-request :get "/health")).body)
+             ;; A write endpoint is now reachable.
+             (println (handle (http.test-request :post "/echo" :body "written")).body)
+             (let r (http.test-request :get "/x" :headers {"accept" "text/plain"} :body "b"))
+             (println (get r.headers "accept" "missing"))
+             (println r.body))"#);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert_eq!(
+        result.output.trim_end().lines().collect::<Vec<_>>(),
+        [
+            "ok",         // the two-argument form is unchanged
+            "written",    // the body reached the handler
+            "text/plain", // headers are carried too
+            "b",
+        ]
+    );
+}
+
+// korben-ajx
+/// The method is a keyword *value*, while `:body` names a parameter. Both
+/// appear in one call and each has to be read correctly.
+#[test]
+fn a_method_keyword_is_a_value_not_a_parameter_name() {
+    let result = run(r#"(module m (use std.http :as http))
+           (fn main [] -> Unit !io
+             (let r (http.test-request :post "/p" :body "x"))
+             (println r.method)
+             (println r.path)
+             (println r.body))"#);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert_eq!(result.output.trim_end().lines().collect::<Vec<_>>(), [":post", "/p", "x"]);
+}
