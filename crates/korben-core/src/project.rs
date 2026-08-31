@@ -51,6 +51,14 @@ pub struct Session {
     pub resolution: crate::pkg::Resolution,
     /// True when the lockfile was regenerated rather than reproduced.
     pub lock_written: bool,
+    // korben-vok
+    /// What the checker concluded about each expression, keyed by span.
+    ///
+    /// Inference used to be run and thrown away, so anything downstream that
+    /// wanted a type -- the code generator, an editor hover -- either did
+    /// without or ran inference again and got a second opinion. This is the
+    /// first opinion, kept.
+    pub types: std::collections::HashMap<korben_syntax::Span, crate::types::Type>,
     /// Which packages each package may import from.
     visibility: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
     /// Which package each loaded module came from.
@@ -78,6 +86,7 @@ impl Session {
             manifest,
             resolution: crate::pkg::Resolution::default(),
             lock_written: false,
+            types: std::collections::HashMap::new(),
             visibility: std::collections::BTreeMap::new(),
             module_package: HashMap::new(),
             loaded: HashSet::new(),
@@ -123,6 +132,7 @@ impl Session {
             manifest,
             resolution: crate::pkg::Resolution::default(),
             lock_written: false,
+            types: std::collections::HashMap::new(),
             visibility: std::collections::BTreeMap::new(),
             module_package: HashMap::new(),
             loaded: HashSet::new(),

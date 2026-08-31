@@ -23,6 +23,11 @@ pub fn check_session(session: &mut Session, strict_api: bool) {
     let duplicates = crate::scope::duplicate_declarations(&session.modules);
     session.diagnostics.extend(duplicates);
     let mut checker = Checker::new(strict_api);
+    // korben-vok
+    // Record what inference concludes rather than throwing it away. Everything
+    // downstream that wants a type used to either do without one or run
+    // inference a second time and risk a different answer.
+    checker.chart = Some(Vec::new());
     checker.namespace = crate::scope::Namespace::build(&session.modules);
     // Nominal declarations across all modules are visible to the checker; the
     // module system already rejected anything that is not actually in scope.
@@ -35,6 +40,13 @@ pub fn check_session(session: &mut Session, strict_api: bool) {
     for module in &session.modules {
         checker.check_module(module);
     }
+    // korben-vok
+    // Resolved here rather than as each expression was walked, because
+    // inference keeps learning after it passes one: a variable settled by a
+    // later constraint should be recorded settled. Later entries win, since
+    // the last conclusion about a span is the one inference stood by.
+    let charted = checker.chart.take().unwrap_or_default();
+    session.types = charted.into_iter().map(|(span, ty)| (span, checker.resolve(&ty))).collect();
     session.diagnostics.extend(checker.diagnostics);
     // Ownership runs after inference so its diagnostics come second, and so a
     // program with type errors is not also buried in ownership noise.
@@ -47,34 +59,18 @@ pub fn check_session(session: &mut Session, strict_api: bool) {
 // korben-efd
 /// Every expression's inferred type, keyed by span, for editor hover.
 ///
-/// This runs the same inference `check_session` does; it differs only in
-/// recording what it concludes along the way, so a hover reports the type the
-/// checker actually used rather than a second opinion computed another way.
+// korben-vok
+/// This used to run inference a second time to record what it concluded, so
+/// an editor paid for two full passes over the workspace on every analysis and
+/// a hover could disagree with the diagnostics beside it. `check_session` now
+/// keeps its own conclusions, and this reports those -- so a hover is the
+/// checker's answer rather than a second opinion.
+///
+/// Call `check_session` first; before it runs there is nothing to report.
 pub fn chart_session(session: &Session) -> Vec<(Span, String)> {
-    let mut checker = Checker::new(false);
-    checker.namespace = crate::scope::Namespace::build(&session.modules);
-    checker.chart = Some(Vec::new());
-    for module in &session.modules {
-        checker.collect_types(module);
-    }
-    for module in &session.modules {
-        checker.collect_signatures(module);
-    }
-    for module in &session.modules {
-        checker.check_module(module);
-    }
-    let charted = checker.chart.take().unwrap_or_default();
-    charted
-        .into_iter()
-        .map(|(span, ty)| {
-            let resolved = checker.resolve(&ty);
-            (span, resolved.to_string())
-        })
-        .collect()
+    session.types.iter().map(|(span, ty)| (*span, ty.to_string())).collect()
 }
 
-/// Infer the type of a single expression against the session's declarations.
-/// Used by the REPL's `:type` command and by editor hover.
 pub fn type_of(session: &Session, expr: &Expr) -> String {
     let mut checker = Checker::new(false);
     checker.namespace = crate::scope::Namespace::build(&session.modules);
