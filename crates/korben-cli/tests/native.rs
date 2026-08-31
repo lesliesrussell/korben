@@ -194,7 +194,7 @@ fn control_flow_and_errors_agree() {
   (println (counters))
   (println (cond false :a :else :b) (when true :yes) (unless true :no))
   (println (and 1 2 3) (or false :fallback))
-  (println (if-let n (Some 42) n :none))
+  (println (if-let n (Some 42) n 0))
   (try
     (throw "boom")
     (catch Condition c (println "caught" c))

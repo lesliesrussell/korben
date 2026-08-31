@@ -655,8 +655,63 @@ impl Checker {
         );
 
         // --- std.json ---------------------------------------------------
-        // `decode` is deliberately absent: it answers with whatever the text
-        // held, and korben has no type for that yet. See korben-6nt.
+        // korben-6nt
+        // `decode` answers with `Json`, which is opaque, and the accessors
+        // below are the only way through it. That is what makes an annotation
+        // on decoded data checkable: before this, `decode` had no signature at
+        // all, so `-> Vec (Map Keyword String)` on a decoded value was
+        // accepted and was fiction.
+        //
+        // Once every value inside is `Json`, korben's homogeneous `Map K V`
+        // describes a decoded object exactly: `Map Keyword Json`. The
+        // heterogeneity was only ever in the eye of the annotation.
+        let json = Type::app("Json", Vec::new());
+        let result = |ok: Type| Type::app("Result", vec![ok, string.clone()]);
+        define(
+            "std.json/decode",
+            Scheme {
+                vars: Vec::new(),
+                ty: Type::function(vec![string.clone()], result(json.clone()), Effects::NONE),
+            },
+        );
+        // Narrowing: each answers `Err` when the value is not that shape.
+        for (name, produced) in [
+            ("object", Type::app("Map", vec![Type::app("Keyword", Vec::new()), json.clone()])),
+            ("array", Type::app("Vec", vec![json.clone()])),
+            ("string", string.clone()),
+            ("int", int.clone()),
+            ("float", float.clone()),
+            ("bool", Type::bool()),
+        ] {
+            define(
+                &format!("std.json/{name}"),
+                Scheme {
+                    vars: Vec::new(),
+                    ty: Type::function(vec![json.clone()], result(produced), Effects::NONE),
+                },
+            );
+        }
+        // A field of an object, by its name as JSON spells it -- a string.
+        // Decoding turns object keys into keywords, so reaching for one with a
+        // string through `get` silently misses; this does not.
+        define(
+            "std.json/field",
+            Scheme {
+                vars: Vec::new(),
+                ty: Type::function(
+                    vec![json.clone(), string.clone()],
+                    result(json.clone()),
+                    Effects::NONE,
+                ),
+            },
+        );
+        define(
+            "std.json/null?",
+            Scheme {
+                vars: Vec::new(),
+                ty: Type::function(vec![json.clone()], Type::bool(), Effects::NONE),
+            },
+        );
         for name in ["encode", "encode-pretty"] {
             define(
                 &format!("std.json/{name}"),
@@ -1972,7 +2027,7 @@ impl Checker {
                     }
                     return;
                 };
-                let fields = self
+                let declared = self
                     .enums
                     .get(&owner)
                     .and_then(|table| {
@@ -1980,6 +2035,8 @@ impl Checker {
                     })
                     .map(|(_, fields)| fields)
                     .unwrap_or_default();
+                // korben-6nt
+                let fields = self.carried_payload(&owner, name, value).unwrap_or(declared);
                 if !positional.is_empty() && positional.len() != fields.len() && !fields.is_empty()
                 {
                     self.diagnostics.push(
@@ -2022,6 +2079,39 @@ impl Checker {
                 }
             }
         }
+    }
+
+    // korben-6nt
+    /// The payload type a pattern on `Option` or `Result` should bind.
+    ///
+    /// Taken from the type being matched, not from the declaration. Declared
+    /// payloads are `Unknown` for every parametric type, because `lower_type`
+    /// erases type parameters -- so `(Ok data)` used to bind `data` as
+    /// `Unknown`, which unifies with anything. That is what let a false
+    /// annotation stand on any value that had been through a `Result`, which
+    /// is every value that comes from the outside world.
+    ///
+    /// These two are special-cased rather than fixed in general because the
+    /// general fix is real parametric variants, which is a larger change. For
+    /// `Option` and `Result` the answer is sitting in the scrutinee, and
+    /// losing it was never necessary.
+    fn carried_payload(
+        &mut self,
+        owner: &str,
+        variant: &str,
+        scrutinee: &Type,
+    ) -> Option<Vec<(String, Type)>> {
+        let Type::Con(name, args) = self.prune(scrutinee) else { return None };
+        if &*name != owner {
+            return None;
+        }
+        let carried = match (owner, variant) {
+            ("Option", "Some") | ("Result", "Ok") => args.first()?,
+            ("Result", "Err") => args.get(1)?,
+            _ => return None,
+        };
+        let field = if variant == "Err" { "error" } else { "value" };
+        Some(vec![(field.to_string(), carried.clone())])
     }
 
     /// Field lookup used by patterns, which must not complain about maps.
@@ -2221,6 +2311,11 @@ fn builtin_type_names() -> HashSet<String> {
         "Path",
         "Syntax",
         "IoError",
+        // korben-6nt
+        // What `json.decode` answers with. Opaque on purpose: the text held
+        // whatever it held, and the only honest thing to say before looking is
+        // that it is JSON.
+        "Json",
         "Fn",
         "File",
         // Ownership qualifiers from specification 12.1.

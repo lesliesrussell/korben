@@ -640,3 +640,82 @@ fn the_suggestion_does_not_change_between_runs() {
         assert_eq!(suggest(), first, "the suggestion changed between runs");
     }
 }
+
+// ------------------------------------------------------------------ json
+
+// korben-6nt
+/// An annotation on decoded JSON has to be checked like any other.
+///
+/// It was not. `json.decode` had no signature, and `Ok`'s payload was declared
+/// `Unknown` -- which unifies with anything -- so a claim about decoded data
+/// was accepted whatever it said. The same claim written as a literal was
+/// rejected, which is how the hole was found: the checker enforced a type
+/// against code it could see and not against data from outside, which is the
+/// one place a static language most needs to.
+#[test]
+fn a_false_annotation_on_decoded_json_is_rejected() {
+    assert_eq!(
+        check(
+            r#"(module m (use std.json :as json))
+               (pub fn from-decode [] -> Vec (Map Keyword String)
+                 (match (json.decode "[]")
+                   (Err _) []
+                   (Ok data) data))"#
+        ),
+        vec!["type-mismatch"]
+    );
+}
+
+// korben-6nt
+/// `Json` is opaque, so a value that is not one cannot be narrowed as if it
+/// were.
+#[test]
+fn a_json_accessor_rejects_a_value_that_is_not_json() {
+    assert_eq!(
+        check(
+            r#"(module m (use std.json :as json))
+               (pub fn f [] -> Result String String (json.string "hello"))"#
+        ),
+        vec!["type-mismatch"]
+    );
+}
+
+// korben-6nt
+/// And the honest annotation is accepted, which is the other half of the
+/// claim: once every value inside is `Json`, korben's homogeneous `Map K V`
+/// describes a decoded object exactly.
+#[test]
+fn the_honest_shape_of_decoded_json_checks() {
+    assert!(check(
+        r#"(module m (use std.json :as json))
+           (pub fn fields [] -> Result (Map Keyword Json) String
+             (match (json.decode "{}")
+               (Err e) (Err e)
+               (Ok data) (json.object data)))"#
+    )
+    .is_empty());
+}
+
+// korben-6nt
+/// A pattern on `Option` or `Result` binds the payload the type carries. This
+/// is the general half: it is not about JSON, it is about every value that
+/// reaches a program through a `Result`.
+#[test]
+fn a_result_pattern_binds_the_type_the_result_carries() {
+    assert_eq!(
+        check(
+            "(fn produce [] -> Result Int String (Ok 1))
+             (pub fn f [] -> String (match (produce) (Err e) e (Ok n) n))"
+        ),
+        vec!["type-mismatch"],
+        "`n` is the `Int` the Result carries, not an unknown"
+    );
+    assert!(
+        check(
+            "(fn produce [] -> Result Int String (Ok 1))
+             (pub fn f [] -> Int (match (produce) (Err _) 0 (Ok n) n))"
+        )
+        .is_empty(),
+        "and using it as that Int is fine"
+    );
+}
