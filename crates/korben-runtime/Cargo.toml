@@ -6,6 +6,15 @@ license.workspace = true
 description = "The Korben runtime: values, operations, and the standard library, shared by the interpreter and generated native code"
 
 [dependencies]
+# korben-5wu
+# Stackful coroutines: one stack per task, switched on this thread. That is
+# what lets a task suspend anywhere -- deep inside interpreted recursion or
+# inside generated native code -- with `Rc` values alive on its stack, because
+# the switch never crosses a thread. Unlike TLS this is not optional: async is
+# a language feature, and a build flag that changed its semantics would be two
+# concurrency models wearing one name.
+corosensei = "0.2"
+
 # korben-ggd
 # TLS is optional and off by default. korben-runtime's source is written into
 # every generated project, so a dependency here is one every korben program

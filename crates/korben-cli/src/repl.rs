@@ -226,8 +226,7 @@ fn evaluate(session: &mut Session, source: &str, env: &Env, interactive: bool) {
     for error in errors {
         diagnostics.push(error);
     }
-    let expanded =
-        korben_core::expand::expand_module(&session.interp, &forms, &mut diagnostics);
+    let expanded = korben_core::expand::expand_module(&session.interp, &forms, &mut diagnostics);
     if report(&diagnostics, session) {
         return;
     }

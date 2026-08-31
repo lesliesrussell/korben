@@ -404,11 +404,15 @@ impl Generator {
             "    korben_runtime::std::set_program_args(std::env::args().skip(1).collect());"
         );
         let _ = writeln!(self.out, "    install_impls();");
-        let _ = writeln!(self.out, "    let mut host = Host;");
+        // korben-5wu
+        // A task owns a counted handle on the host, because its stack outlives
+        // the call that started it. Install one before anything can spawn.
+        let _ =
+            writeln!(self.out, "    let host: std::rc::Rc<dyn Caller> = std::rc::Rc::new(Host);");
+        let _ = writeln!(self.out, "    korben_runtime::task::set_host(host.clone());");
         match &program.entry {
             Some(entry) => {
-                let _ =
-                    writeln!(self.out, "    match f_{entry}(&mut host, Vec::new(), Loc::NONE) {{");
+                let _ = writeln!(self.out, "    match f_{entry}(&*host, Vec::new(), Loc::NONE) {{");
                 let _ = writeln!(self.out, "        Ok(value) => {{");
                 // `main` returning `Err` is a failed process exit.
                 let _ = writeln!(self.out, "            if is_variant(&value, \"Err\") {{");
@@ -989,7 +993,7 @@ impl Generator {
                 format!(
                     "{{ let __scope = enter_scope({}); let {slot} = __scope.clone(); \
                      let __out: Outcome = {compiled}; \
-                     let __closed = exit_scope(__c, &__scope, __out.is_err()); \
+                     let __closed = exit_scope(&__scope, __out.is_err()); \
                      let __value = kb_try!({outer}, __out); \
                      kb_try!({outer}, __closed.map(|_| Value::Nil)); __value }}",
                     quote(slot)
@@ -1012,7 +1016,7 @@ impl Generator {
                 let slot = self.temp();
                 let outer = self.error_label();
                 format!(
-                    "{{ let {slot} = {inner}; kb_try!({outer}, await_value(__c, &{slot}, {})) }}",
+                    "{{ let {slot} = {inner}; kb_try!({outer}, await_value(&{slot}, {})) }}",
                     loc_expr(loc_of(*span))
                 )
             }
@@ -1593,6 +1597,9 @@ pub const RUNTIME_FILES: &[(&str, &str)] = &[
 // korben-ggd
 /// The vendored runtime's manifest.
 ///
+/// `corosensei` is unconditional: every program's tasks are coroutines, so
+/// there is no version of the runtime that does without it.
+///
 /// The TLS dependencies are written only for a program that asks for TLS.
 /// Declaring them and leaving them off would not be enough: cargo still has to
 /// resolve an optional dependency against the registry to write a lock file,
@@ -1601,7 +1608,7 @@ pub const RUNTIME_FILES: &[(&str, &str)] = &[
 /// at all, and builds offline exactly as before.
 fn runtime_manifest(needs_tls: bool) -> String {
     let mut manifest = String::from(
-        "[package]\nname = \"korben-runtime\"\nversion = \"0.1.0\"\nedition = \"2021\"\nlicense = \"MIT\"\n\n[dependencies]\n",
+        "[package]\nname = \"korben-runtime\"\nversion = \"0.1.0\"\nedition = \"2021\"\nlicense = \"MIT\"\n\n[dependencies]\ncorosensei = \"0.2\"\n",
     );
     if needs_tls {
         manifest.push_str(
