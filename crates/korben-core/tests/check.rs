@@ -787,3 +787,52 @@ fn a_generic_record_field_resolves_against_its_arguments() {
         "and the right one checks"
     );
 }
+
+// korben-41f
+/// A record is constructed by field name as well as by position.
+///
+/// `apply::construct` always accepted this; the checker modelled a constructor
+/// as a plain positional function, counted each `:name` and its value
+/// separately, and reported a three-field type as having been given six
+/// arguments. The two halves of the toolchain disagreed about whether the
+/// feature existed, which is worse for a language than not having it.
+#[test]
+fn a_record_can_be_constructed_by_field_name() {
+    let point = "(pub type Point {x: Int y: Int label: String})";
+    assert!(
+        check(&format!("{point} (pub fn f [] -> Point (Point :x 1 :y 2 :label \"p\"))")).is_empty(),
+        "named construction checks"
+    );
+    assert!(
+        check(&format!("{point} (pub fn f [] -> Point (Point 1 2 \"p\"))")).is_empty(),
+        "and so does the positional form it has always had"
+    );
+    assert!(
+        check(
+            "(pub enum Shape (Circle radius: Int))
+               (pub fn f [] -> Shape (Circle :radius 3))"
+        )
+        .is_empty(),
+        "a variant names its fields too"
+    );
+}
+
+// korben-41f
+/// Accepting the form is only half of it: the fields have to be checked.
+#[test]
+fn named_construction_is_checked_not_merely_permitted() {
+    let point = "(pub type Point {x: Int y: Int label: String})";
+    assert_eq!(
+        check(&format!("{point} (pub fn f [] -> Point (Point :x \"one\" :y 2 :label \"p\"))")),
+        vec!["type-mismatch"],
+        "a field's value must have the field's type"
+    );
+    assert_eq!(
+        check(&format!("{point} (pub fn f [] -> Point (Point :x 1 :y 2))")),
+        vec!["missing-field"]
+    );
+    assert_eq!(
+        check(&format!("{point} (pub fn f [] -> Point (Point :x 1 :x 2 :y 2 :label \"p\"))")),
+        vec!["duplicate-field"]
+    );
+}

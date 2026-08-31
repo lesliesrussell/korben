@@ -40,6 +40,14 @@ pub struct FnType {
     /// Names this function accepts as `:keyword value`, which bind by name
     /// rather than by position.
     pub keywords: Vec<String>,
+    // korben-41f
+    /// For a constructor, the fields it builds, in declaration order.
+    ///
+    /// Distinct from `keywords`, which names parameters that are *only* passed
+    /// by name and take no part in arity. A constructor's field is neither: it
+    /// can be given positionally or by name, and the runtime accepts one form
+    /// or the other but not a mix. Empty for an ordinary function.
+    pub fields: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -59,7 +67,14 @@ impl Type {
     }
 
     pub fn function(params: Vec<Type>, ret: Type, effects: Effects) -> Type {
-        Type::Fn(Rc::new(FnType { params, ret, effects, variadic: false, keywords: Vec::new() }))
+        Type::Fn(Rc::new(FnType {
+            params,
+            ret,
+            effects,
+            variadic: false,
+            keywords: Vec::new(),
+            fields: Vec::new(),
+        }))
     }
 
     /// A function that also accepts named arguments.
@@ -69,12 +84,39 @@ impl Type {
         effects: Effects,
         keywords: Vec<String>,
     ) -> Type {
-        Type::Fn(Rc::new(FnType { params, ret, effects, variadic: false, keywords }))
+        Type::Fn(Rc::new(FnType {
+            params,
+            ret,
+            effects,
+            variadic: false,
+            keywords,
+            fields: Vec::new(),
+        }))
+    }
+
+    // korben-41f
+    /// A constructor: each field may be given positionally or by name.
+    pub fn constructor(params: Vec<Type>, ret: Type, fields: Vec<String>) -> Type {
+        Type::Fn(Rc::new(FnType {
+            params,
+            ret,
+            effects: Effects::NONE,
+            variadic: false,
+            keywords: Vec::new(),
+            fields,
+        }))
     }
 
     /// A function that accepts at least `params` arguments and then any number more.
     pub fn variadic(params: Vec<Type>, ret: Type, effects: Effects) -> Type {
-        Type::Fn(Rc::new(FnType { params, ret, effects, variadic: true, keywords: Vec::new() }))
+        Type::Fn(Rc::new(FnType {
+            params,
+            ret,
+            effects,
+            variadic: true,
+            keywords: Vec::new(),
+            fields: Vec::new(),
+        }))
     }
 
     pub fn unit() -> Type {

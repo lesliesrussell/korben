@@ -311,6 +311,7 @@ impl Checker {
                 effects: function.effects,
                 variadic: function.variadic,
                 keywords: function.keywords.clone(),
+                fields: function.fields.clone(),
             })),
             Type::Record(record) => Type::Record(Rc::new(RecordType {
                 name: record.name.clone(),
@@ -1077,9 +1078,11 @@ impl Checker {
             TypeBody::Record(fields) => {
                 let param_types: Vec<Type> =
                     fields.iter().map(|(_, ty, _)| self.lower_type(ty, &params)).collect();
+                // korben-41f
+                let names: Vec<String> = fields.iter().map(|(name, _, _)| name.clone()).collect();
                 self.globals.insert(
                     qualified.clone(),
-                    Scheme { vars: bound, ty: Type::function(param_types, result, Effects::NONE) },
+                    Scheme { vars: bound, ty: Type::constructor(param_types, result, names) },
                 );
             }
             TypeBody::Newtype(inner) => {
@@ -1096,12 +1099,15 @@ impl Checker {
                         .iter()
                         .map(|(_, ty, _)| self.lower_type(ty, &params))
                         .collect();
+                    // korben-41f: a variant's fields name themselves too.
+                    let names: Vec<String> =
+                        variant.fields.iter().map(|(name, _, _)| name.clone()).collect();
                     let scheme = Scheme {
                         vars: bound.clone(),
                         ty: if param_types.is_empty() {
                             result.clone()
                         } else {
-                            Type::function(param_types, result.clone(), Effects::NONE)
+                            Type::constructor(param_types, result.clone(), names)
                         },
                     };
                     self.globals.insert(crate::scope::qualify(&self.module, &variant.name), scheme);
@@ -1781,6 +1787,19 @@ impl Checker {
         match self.prune(&callee_type) {
             Type::Fn(function) => {
                 self.effects = self.effects.union(function.effects);
+                // korben-41f
+                // A constructor takes its fields either all positionally or
+                // all by name -- `apply::construct` accepts one form or the
+                // other, not a mix -- so the named form is settled here before
+                // the positional rules below, which cannot express it.
+                if !function.fields.is_empty()
+                    && !arg_types.is_empty()
+                    && arg_types.iter().all(|(arg, _)| {
+                        arg.keyword.as_ref().is_some_and(|name| function.fields.contains(name))
+                    })
+                {
+                    return self.named_construction(&function, &arg_types, callee, span);
+                }
                 // A keyword argument binds by name only when the callee declares
                 // that keyword. Otherwise it passes through positionally as a
                 // keyword literal and its value, exactly as the runtime does.
@@ -2175,6 +2194,58 @@ impl Checker {
         declared.into_iter().map(|(name, ty)| (name, substitute(&ty, &mapping))).collect()
     }
 
+    // korben-41f
+    /// Check a constructor call whose arguments are all field names.
+    ///
+    /// `(Point :x 1 :y 2 :label "p")` is what `apply::construct` builds, and
+    /// the checker used to reject it: a constructor was modelled as a plain
+    /// positional function, so each `:name` and its value were counted
+    /// separately and a three-field type appeared to be given six arguments.
+    /// The two halves of the toolchain disagreed about whether the feature
+    /// existed, which is worse than not having it.
+    fn named_construction(
+        &mut self,
+        function: &FnType,
+        args: &[(&Arg, Type)],
+        callee: &Expr,
+        span: Span,
+    ) -> Type {
+        let mut seen: Vec<&str> = Vec::new();
+        for (arg, actual) in args {
+            let Some(name) = arg.keyword.as_deref() else { continue };
+            let Some(index) = function.fields.iter().position(|field| field == name) else {
+                continue;
+            };
+            if seen.contains(&name) {
+                self.diagnostics.push(
+                    Diagnostic::error(format!("`{name}` is given twice"))
+                        .with_code("duplicate-field")
+                        .at(arg.span, "this field already has a value"),
+                );
+            }
+            seen.push(name);
+            if let Some(param) = function.params.get(index) {
+                self.expect(param, actual, arg.span, "in a field");
+            }
+        }
+        let missing: Vec<&str> = function
+            .fields
+            .iter()
+            .map(String::as_str)
+            .filter(|field| !seen.contains(field))
+            .collect();
+        if !missing.is_empty() {
+            let _ = callee;
+            self.diagnostics.push(
+                Diagnostic::error(format!("missing field(s): {}", missing.join(", ")))
+                    .with_code("missing-field")
+                    .at(span, "this construction leaves fields unset")
+                    .help("every field needs a value, positionally or by name"),
+            );
+        }
+        function.ret.clone()
+    }
+
     /// Field lookup used by patterns, which must not complain about maps.
     fn field_type_quiet(&mut self, target: &Type, name: &str) -> Type {
         match self.prune(target) {
@@ -2255,6 +2326,7 @@ fn substitute(ty: &Type, mapping: &HashMap<TypeVar, Type>) -> Type {
             effects: function.effects,
             variadic: function.variadic,
             keywords: function.keywords.clone(),
+            fields: function.fields.clone(),
         })),
         Type::Record(record) => Type::Record(Rc::new(RecordType {
             name: record.name.clone(),
