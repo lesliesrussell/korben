@@ -340,6 +340,13 @@ mod templates {
         (Err (BadRequest reason)) (http.json 400 (json.encode {error reason})))
 
     {:method :get :path "/greeting"} (http.json 200 (json.encode {message "Hello, world!"}))
+    ; A write endpoint reads the request body.
+    {:method :post :path "/greeting"}
+      (do
+        (let name request.body)
+        (match (greeting-for name)
+          (Ok message) (http.json 201 (json.encode {message message}))
+          (Err (BadRequest reason)) (http.json 400 (json.encode {error reason}))))
 
     _ (http.not-found)))
 
@@ -375,6 +382,15 @@ mod templates {
 
 (test "unknown paths are not found"
   (assert-eq 404 (handle (http.test-request :get "/nope")).status))
+
+; korben-ajx: `:body` lets a write endpoint be tested without a socket.
+(test "posting a name greets it"
+  (let response (handle (http.test-request :post "/greeting" :body "Ada")))
+  (assert-eq 201 response.status)
+  (assert (contains? response.body "Hello, Ada!") "expected the name in the body"))
+
+(test "posting an empty name is a bad request"
+  (assert-eq 400 (handle (http.test-request :post "/greeting" :body "")).status))
 "#;
 }
 

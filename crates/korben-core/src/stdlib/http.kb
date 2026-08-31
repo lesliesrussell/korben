@@ -55,14 +55,22 @@
   (json 404 "{\"error\":\"not found\"}"))
 
 ;;; A request built by hand, for testing a handler without a socket.
-(pub fn test-request [method: Keyword path: String] -> Request
+;;;
+;;; `headers` and `body` are named and default to empty, so the common case
+;;; stays `(test-request :get "/health")`. Without them no handler that reads
+;;; a body -- every POST, PUT and PATCH a service has -- could be tested
+;;; without opening a socket, which is the part of a service most worth
+;;; testing.
+(pub fn test-request [method: Keyword path: String
+                      :headers headers: Map String String = {}
+                      :body body: String = ""] -> Request
   (let split (path-and-query path))
   (Request
     {method method
      path (get split 0 "/")
      query (parse-query (get split 1 ""))
-     headers {}
-     body ""}))
+     headers headers
+     body body}))
 
 ;; ----------------------------------------------------------------- parsing
 

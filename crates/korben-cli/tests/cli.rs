@@ -911,8 +911,6 @@ fn the_http_server_answers_a_real_client() {
 /// could exhaust its own ephemeral ports before the server broke a sweat.
 #[test]
 fn a_connection_is_reused_across_requests() {
-    use std::io::{Read, Write};
-
     let scratch = Scratch::new("keepalive");
     assert!(korben(scratch.path(), &["new", "app"]).status.success());
     let project = scratch.path().join("app");
@@ -947,6 +945,40 @@ fn a_connection_is_reused_across_requests() {
         .spawn()
         .expect("start the server");
 
+    // `free_port` releases the port before the server binds it, so another
+    // test's server can claim it in between. That is a race in this harness,
+    // not in keep-alive, and it appears as an I/O error. A server that really
+    // closed the connection returns end-of-file instead, which the exchange
+    // asserts on -- so an error is retried and a broken promise is not.
+    let mut failure: Option<String> = None;
+    for _ in 0..3 {
+        match keep_alive_exchange(port) {
+            Ok(()) => {
+                failure = None;
+                break;
+            }
+            Err(error) => failure = Some(error),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    if let Some(error) = failure {
+        let _ = server.kill();
+        let _ = server.wait();
+        panic!("{error}");
+    }
+
+    let _ = server.kill();
+    let _ = server.wait();
+}
+
+// korben-92b
+/// Two requests down one socket, each read by its content-length.
+///
+/// Returns `Err` for trouble at the socket, which the caller retries, and
+/// asserts on anything the server promised and did not deliver.
+fn keep_alive_exchange(port: u16) -> Result<(), String> {
+    use std::io::{Read, Write};
+
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let mut stream = loop {
         match std::net::TcpStream::connect(("127.0.0.1", port)) {
@@ -955,38 +987,41 @@ fn a_connection_is_reused_across_requests() {
                 std::thread::sleep(std::time::Duration::from_millis(20));
                 let _ = error;
             }
-            Err(error) => panic!("could not reach the server on {port}: {error}"),
+            Err(error) => return Err(format!("could not reach the server on {port}: {error}")),
         }
     };
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(10))).map_err(|e| e.to_string())?;
 
-    // Two requests down the same socket, each read by its content-length
-    // rather than by waiting for a close that should not come.
     for attempt in 0..2 {
-        stream.write_all(b"GET /health HTTP/1.1\r\nhost: localhost\r\n\r\n").expect("write");
-        stream.flush().expect("flush");
+        stream
+            .write_all(b"GET /health HTTP/1.1\r\nhost: localhost\r\n\r\n")
+            .map_err(|error| format!("write on request {attempt}: {error}"))?;
+        stream.flush().map_err(|error| error.to_string())?;
 
         let mut seen = Vec::new();
         let mut byte = [0u8; 1];
-        // Read the head, then exactly the two bytes of "ok".
         while !seen.ends_with(b"\r\n\r\n") {
-            let read = stream.read(&mut byte).expect("read the head");
-            assert!(read == 1, "the server closed during request {attempt}");
+            let read = stream
+                .read(&mut byte)
+                .map_err(|error| format!("read on request {attempt}: {error}"))?;
+            // End-of-file is the regression this test exists to catch, so it
+            // fails here rather than being retried as trouble at the socket.
+            assert!(read == 1, "the server closed the connection during request {attempt}");
             seen.push(byte[0]);
         }
-        let head = String::from_utf8(seen).expect("utf-8");
+        let head = String::from_utf8(seen).map_err(|error| error.to_string())?;
         assert!(head.starts_with("HTTP/1.1 200 OK\r\n"), "request {attempt}: {head:?}");
         assert!(
             head.contains("connection: keep-alive\r\n"),
             "request {attempt} should be told the connection stays open: {head:?}"
         );
         let mut body = [0u8; 2];
-        stream.read_exact(&mut body).expect("read the body");
+        stream
+            .read_exact(&mut body)
+            .map_err(|error| format!("body on request {attempt}: {error}"))?;
         assert_eq!(&body, b"ok", "request {attempt}");
     }
-
-    let _ = server.kill();
-    let _ = server.wait();
+    Ok(())
 }
 
 /// The client and the server speak to each other, in separate processes.
