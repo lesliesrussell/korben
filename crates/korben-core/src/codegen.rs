@@ -178,7 +178,7 @@ const IMPORTS: &[(&str, &[&str])] = &[
     ),
     ("ffi", &["CSignature", "CType"]),
     ("loc", &["Loc"]),
-    ("task", &["await_value", "enter_scope", "exit_scope", "spawn"]),
+    ("task", &["await_value", "enter_scope", "exit_scope", "maybe_yield", "spawn"]),
     (
         "value",
         &[
@@ -503,7 +503,8 @@ impl Generator {
 
         let _ = writeln!(
             self.out,
-            "fn f_{symbol}(__c: &dyn Caller, __args: Vec<Arg>, __loc: Loc) -> Outcome {{"
+            "fn f_{symbol}(__c: &dyn Caller, __args: Vec<Arg>, __loc: Loc) -> Outcome {{\n\
+             \x20   maybe_yield();"
         );
         let _ = writeln!(self.out, "    thread_local! {{");
         let _ = writeln!(self.out, "        static SIG: CSignature = s_{symbol}();");
@@ -539,7 +540,8 @@ impl Generator {
 
         let _ = writeln!(
             self.out,
-            "fn f_{symbol}(__c: &dyn Caller, __args: Vec<Arg>, __loc: Loc) -> Outcome {{"
+            "fn f_{symbol}(__c: &dyn Caller, __args: Vec<Arg>, __loc: Loc) -> Outcome {{\n\
+             \x20   maybe_yield();"
         );
         let _ = writeln!(self.out, "    let mut __args = __args;");
         let _ = writeln!(self.out, "    loop {{");
