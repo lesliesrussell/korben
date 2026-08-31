@@ -589,7 +589,7 @@ fn cmd_test(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let tests = std::mem::take(&mut session.interp.tests);
+    let tests = session.interp.tests.take();
     let mut passed = 0usize;
     let mut failures: Vec<(String, String, Diagnostic)> = Vec::new();
     let mut results = Vec::new();
@@ -613,7 +613,7 @@ fn cmd_test(args: &[String]) -> ExitCode {
             for (binding, generator) in &decl.generators {
                 match session.interp.eval(generator, &scope) {
                     Ok(value) => {
-                        let sample = match sample_from(&mut session.interp, value, decl.span) {
+                        let sample = match sample_from(&session.interp, value, decl.span) {
                             Ok(sample) => sample,
                             Err(flow) => {
                                 generated = Err(project::flow_diagnostic(flow, decl.span));
@@ -707,7 +707,7 @@ fn cmd_test(args: &[String]) -> ExitCode {
 }
 
 /// Draw one sample from a generator: a function is called, a vector is indexed.
-fn sample_from(interp: &mut Interp, generator: Value, span: Span) -> Result<Value, Flow> {
+fn sample_from(interp: &Interp, generator: Value, span: Span) -> Result<Value, Flow> {
     match generator {
         Value::Fn(_) => interp.apply(generator, Vec::new(), span),
         other => Ok(other),
@@ -847,7 +847,7 @@ fn cmd_expand(args: &[String]) -> ExitCode {
     }
     let mut diagnostics = Diagnostics::new();
     let expanded =
-        korben_core::expand::expand_module(&mut session.interp, &forms, &mut diagnostics);
+        korben_core::expand::expand_module(&session.interp, &forms, &mut diagnostics);
     session.diagnostics.extend(diagnostics);
 
     if ui::report(&session.diagnostics, &session.sources, false) {
@@ -1995,7 +1995,7 @@ fn cmd_doctor(args: &[String]) -> ExitCode {
             };
             load_all(&mut session, &flags);
             println!("  modules      {}", session.modules.len());
-            println!("  tests        {}", session.interp.tests.len());
+            println!("  tests        {}", session.interp.tests.borrow().len());
             println!("\n{}", ui::bold("health"));
             println!("  {}", ui::summarize(&session.diagnostics));
         }
@@ -2076,14 +2076,14 @@ pub fn open_session(flags: &Flags) -> Result<Session, ExitCode> {
     let standalone =
         flags.positional.first().map(|path| Path::new(path).is_file()).unwrap_or(false);
     match Session::open(&cwd) {
-        Ok(mut session) => {
-            session.interp.max_depth = MAX_CALL_DEPTH;
+        Ok(session) => {
+            session.interp.max_depth.set(MAX_CALL_DEPTH);
             Ok(session)
         }
         Err(error) => {
             if standalone {
-                let mut session = Session::bare(cwd);
-                session.interp.max_depth = MAX_CALL_DEPTH;
+                let session = Session::bare(cwd);
+                session.interp.max_depth.set(MAX_CALL_DEPTH);
                 return Ok(session);
             }
             eprintln!("{} {error}", ui::red("error:"));

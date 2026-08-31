@@ -28,7 +28,7 @@ pub struct MacroEntry {
 }
 
 pub struct Expander<'a> {
-    interp: &'a mut Interp,
+    interp: &'a Interp,
     diagnostics: &'a mut Diagnostics,
     steps: usize,
     expansions: usize,
@@ -39,7 +39,7 @@ pub struct Expander<'a> {
 /// Expand every top-level form in a file, registering macros as they appear so
 /// that later forms can use them.
 pub fn expand_module(
-    interp: &mut Interp,
+    interp: &Interp,
     forms: &[Syntax],
     diagnostics: &mut Diagnostics,
 ) -> Vec<Syntax> {
@@ -133,7 +133,10 @@ impl<'a> Expander<'a> {
             env: Env::root(),
             module: self.interp.current.borrow().name.clone(),
         }));
-        self.interp.macros.insert(decl.name.clone(), Rc::new(MacroEntry { decl, function }));
+        self.interp
+            .macros
+            .borrow_mut()
+            .insert(decl.name.clone(), Rc::new(MacroEntry { decl, function }));
     }
 
     /// Fully expand a form and everything inside it.
@@ -165,7 +168,7 @@ impl<'a> Expander<'a> {
                         }
                         return Syntax::new(Datum::List(expanded), form.span);
                     }
-                    if self.interp.macros.contains_key(head) {
+                    if self.interp.macros.borrow().contains_key(head) {
                         return self.expand_call(head.to_string(), form);
                     }
                 }
@@ -227,7 +230,7 @@ impl<'a> Expander<'a> {
 
     fn expand_call(&mut self, name: String, form: &Syntax) -> Syntax {
         let items = fold_postfix(form.as_list().unwrap());
-        let entry = self.interp.macros[&name].clone();
+        let entry = self.interp.macros.borrow()[&name].clone();
         let (decl, function) = (entry.decl.clone(), entry.function.clone());
 
         if self.stack.iter().any(|(existing, _)| *existing == name) && self.stack.len() > 64 {

@@ -26,7 +26,7 @@ pub fn run(args: &[String]) -> ExitCode {
         Ok(session) => session,
         Err(_) => Session::bare(cwd.clone()),
     };
-    session.interp.max_depth = commands::MAX_CALL_DEPTH;
+    session.interp.max_depth.set(commands::MAX_CALL_DEPTH);
     let project_name = session.manifest.name.clone();
     load_project(&mut session, &flags);
 
@@ -107,7 +107,7 @@ fn dispatch(command: &str, session: &mut Session, env: &Env, flags: &Flags) -> C
                 Ok(fresh) => fresh,
                 Err(_) => Session::bare(root),
             };
-            fresh.interp.max_depth = commands::MAX_CALL_DEPTH;
+            fresh.interp.max_depth.set(commands::MAX_CALL_DEPTH);
             load_project(&mut fresh, flags);
             let errors = fresh.diagnostics.error_count();
             report(&fresh.diagnostics, &fresh);
@@ -132,7 +132,7 @@ fn dispatch(command: &str, session: &mut Session, env: &Env, flags: &Flags) -> C
                 diagnostics.push(error);
             }
             let expanded =
-                korben_core::expand::expand_module(&mut session.interp, &forms, &mut diagnostics);
+                korben_core::expand::expand_module(&session.interp, &forms, &mut diagnostics);
             let Some(form) = expanded.first() else {
                 println!("{} nothing to type", ui::yellow("note:"));
                 return Command::Continue;
@@ -156,7 +156,7 @@ fn dispatch(command: &str, session: &mut Session, env: &Env, flags: &Flags) -> C
                 diagnostics.push(error);
             }
             let expanded =
-                korben_core::expand::expand_module(&mut session.interp, &forms, &mut diagnostics);
+                korben_core::expand::expand_module(&session.interp, &forms, &mut diagnostics);
             if report(&diagnostics, session) {
                 return Command::Continue;
             }
@@ -167,7 +167,7 @@ fn dispatch(command: &str, session: &mut Session, env: &Env, flags: &Flags) -> C
             run_tests(session, filter, env);
         }
         "modules" => {
-            let mut names: Vec<&str> = session.interp.modules.keys().map(String::as_str).collect();
+            let mut names: Vec<String> = session.interp.modules.borrow().keys().cloned().collect();
             names.sort();
             for name in names {
                 println!("  {name}");
@@ -227,7 +227,7 @@ fn evaluate(session: &mut Session, source: &str, env: &Env, interactive: bool) {
         diagnostics.push(error);
     }
     let expanded =
-        korben_core::expand::expand_module(&mut session.interp, &forms, &mut diagnostics);
+        korben_core::expand::expand_module(&session.interp, &forms, &mut diagnostics);
     if report(&diagnostics, session) {
         return;
     }
@@ -285,7 +285,7 @@ fn evaluate(session: &mut Session, source: &str, env: &Env, interactive: bool) {
 }
 
 fn run_tests(session: &mut Session, filter: Option<String>, env: &Env) {
-    let tests = session.interp.tests.clone();
+    let tests = session.interp.tests.borrow().clone();
     let mut passed = 0usize;
     let mut failed = 0usize;
     for (module_name, name, decl, runtime) in tests {
@@ -330,7 +330,7 @@ fn scope_project_into_repl(session: &mut Session) {
         runtime.aliases.borrow_mut().insert(alias, name.clone());
     }
     let entry = session.manifest.main.clone();
-    let Some(module) = session.interp.modules.get(&entry) else { return };
+    let Some(module) = session.interp.modules.borrow().get(&entry).cloned() else { return };
     let exported: Vec<String> = module.exports.borrow().keys().cloned().collect();
     for name in exported {
         runtime.imported.borrow_mut().insert(name.clone(), (entry.clone(), name));
@@ -389,7 +389,7 @@ fn is_balanced(source: &str) -> bool {
 /// Suppress an unused-import warning when the interpreter type is only named.
 #[allow(dead_code)]
 fn interpreter_type(interp: &Interp) -> usize {
-    interp.modules.len()
+    interp.modules.borrow().len()
 }
 
 #[allow(dead_code)]

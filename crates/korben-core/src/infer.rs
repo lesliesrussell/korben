@@ -156,7 +156,7 @@ fn lint_macro_shadow(
     kind: &str,
     diagnostics: &mut Diagnostics,
 ) {
-    let Some(entry) = session.interp.macros.get(name) else { return };
+    let Some(entry) = session.interp.macros.borrow().get(name).cloned() else { return };
     diagnostics.push(
         Diagnostic::warning(format!("`{name}` is also a macro, so this {kind} is never called"))
             .with_code("shadowed-by-macro")

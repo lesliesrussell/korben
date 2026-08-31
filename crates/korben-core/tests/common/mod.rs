@@ -39,7 +39,7 @@ pub fn run(source: &str) -> Run {
 
 fn run_inner(source: &str) -> Run {
     let mut session = Session::bare(PathBuf::from("."));
-    session.interp.max_depth = MAX_DEPTH;
+    session.interp.max_depth.set(MAX_DEPTH);
     session.interp.out.replace(Output::Captured(String::new()));
     let loaded = session.load_text("test", source);
     let mut diagnostics: Vec<String> = session
