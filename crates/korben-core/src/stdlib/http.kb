@@ -144,6 +144,18 @@
     "\r\n"
     response.body))
 
+;; As above, but saying whether the connection is being kept. Rendering takes
+;; the decision as an argument rather than having it written into the headers,
+;; so answering a request does not rebuild the response to carry one field.
+(fn render-framed [response: Response keep?: Bool] -> String
+  (str
+    "HTTP/1.1 " response.status " " (status-text response.status) "\r\n"
+    (header-lines response.headers)
+    "content-length: " (string.byte-length response.body) "\r\n"
+    (if keep? "connection: keep-alive\r\n" "connection: close\r\n")
+    "\r\n"
+    response.body))
+
 ;; ------------------------------------------------------------------ reading
 
 (fn content-length [headers: Map String String] -> Int
@@ -163,26 +175,56 @@
 ;;; pool; this is what stops it costing them indefinitely.
 (def idle-millis: Int 30000)
 
-;; A request has arrived in full once its head is terminated and its body is as
-;; long as the headers promised.
-(fn complete? [raw: String] -> Bool
+;; HTTP/1.1 keeps a connection open unless told otherwise, so anything but an
+;; explicit `close` is a request to reuse it.
+(fn wants-close? [request: Request] -> Bool
+  (= (string.lower (get request.headers "connection" "")) "close"))
+
+;; How the buffer stands: -1 when the request is not yet whole, 0 when it holds
+;; exactly one, 1 when more bytes followed it.
+;;
+;; Parsing a head is not free and this is the only place it need happen before
+;; the handler runs, so completeness and framing are decided together rather
+;; than by two passes over the same bytes.
+;;
+;; A client that pipelines sends the next request before reading this one's
+;; response, so both arrive together. Splitting them apart needs a substring
+;; operation, which `std.string` does not have, so that connection is answered
+;; once and then closed rather than losing what came after. Ordinary clients
+;; do not pipeline.
+(fn framing [raw: String] -> Int
   (match (string.split-once raw "\r\n\r\n")
-    (None) false
+    (None) -1
     (Some parts)
       (do
         (let headers (parse-headers (rest (string.split (get parts 0 "") "\r\n"))))
-        (>= (string.byte-length (get parts 1 "")) (content-length headers)))))
+        (let arrived (string.byte-length (get parts 1 "")))
+        (let promised (content-length headers))
+        (if (< arrived promised) -1 (if (= arrived promised) 0 1)))))
 
-;; Answer one request and close the connection it came on.
-(fn answer [server: Borrow Pool handler: (-> [Request] Response) id: Int raw: String] -> Unit !io
+;; Answer one request. Reports whether the connection is still open.
+(fn answer [server: Borrow Pool
+            handler: (-> [Request] Response)
+            id: Int
+            raw: String
+            reusable?: Bool] -> Bool !io
+  (let parsed (parse-request raw))
+  (let keep?
+    (match parsed
+      (Ok request) (and reusable? (not (wants-close? request)))
+      ;; A request that did not parse leaves the stream at an unknown offset,
+      ;; so there is nothing safe to read next.
+      (Err _) false))
   (let response
-    (match (parse-request raw)
+    (match parsed
       (Ok request) (handler request)
       (Err error) (json 400 (str "{\"error\":\"" (describe error) "\"}"))))
-  (match (server.write id (render-response response))
+  (match (server.write id (render-framed response keep?))
     (Ok _) nil
     (Err _) nil)
-  (server.close-connection id))
+  (if keep?
+    true
+    (do (server.close-connection id) false)))
 
 ;; Take whatever has arrived on one connection, and answer it if that completed
 ;; a request. Anything still partial is kept until that connection is ready
@@ -199,9 +241,14 @@
         (Some chunk)
           (do
             (let raw (str (get pending id "") chunk))
-            (if (complete? raw)
+            (let state (framing raw))
+            (if (>= state 0)
               (do
-                (answer server handler id raw)
+                (answer server handler id raw (= state 0))
+                ;; The buffer is drained either way. A connection kept open
+                ;; holds no entry until it sends something, because `pending`
+                ;; reads a missing entry as empty -- and keeping one per open
+                ;; connection makes every lookup in this table scan them all.
                 (dissoc pending id))
               ;; Still partial. Keep it only while it is worth keeping.
               (if (> (string.byte-length raw) max-pending)
