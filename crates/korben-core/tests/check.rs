@@ -719,3 +719,71 @@ fn a_result_pattern_binds_the_type_the_result_carries() {
         "and using it as that Int is fine"
     );
 }
+
+// ------------------------------------------------------------ generic types
+
+// korben-msz
+/// A generic enum's payload is the type its declaration says it is.
+///
+/// `lower_type` used to erase every type parameter to `Unknown`, which unifies
+/// with anything, so nothing inside a generic declaration was checked. This is
+/// the general form of the hole korben-6nt closed for `Option` and `Result`
+/// alone.
+#[test]
+fn a_generic_enum_checks_what_it_carries() {
+    let source = "(pub enum Holder T (Full value: T) (Empty))
+                  (fn make [] -> Holder Int (Full 1))";
+
+    assert_eq!(
+        check(&format!("{source} (pub fn f [] -> String (match (make) (Empty) \"\" (Full v) v))")),
+        vec!["type-mismatch"],
+        "`v` is the Int the Holder carries"
+    );
+    assert_eq!(
+        check(&format!("{source} (fn wrong [] -> Holder Int (Full \"one\"))")),
+        vec!["type-mismatch"],
+        "and the constructor argument has to agree with the annotation"
+    );
+    assert!(
+        check(&format!("{source} (pub fn f [] -> Int (match (make) (Empty) 0 (Full v) v))"))
+            .is_empty(),
+        "using it as that Int is fine"
+    );
+}
+
+// korben-msz
+/// And it is still generic: the same declaration used at two different
+/// instantiations. A monomorphic scheme would tie them together and fail here,
+/// which is the check that this fixed the hole rather than merely closing it.
+#[test]
+fn a_generic_enum_is_still_generic() {
+    assert!(check(
+        "(pub enum Holder T (Full value: T) (Empty))
+         (fn ints [] -> Holder Int (Full 1))
+         (fn texts [] -> Holder String (Full \"one\"))
+         (pub fn a [] -> Int (match (ints) (Empty) 0 (Full v) v))
+         (pub fn b [] -> String (match (texts) (Empty) \"\" (Full v) v))"
+    )
+    .is_empty());
+}
+
+// korben-msz
+/// A field whose type is a parameter resolves against the arguments the value
+/// carries.
+///
+/// Handing the parameter back unresolved would be worse than saying nothing: a
+/// bound variable read into an inference context aliases a real inference
+/// variable, so the field would quietly agree with whatever the surrounding
+/// code wanted.
+#[test]
+fn a_generic_record_field_resolves_against_its_arguments() {
+    let source = "(pub type Pair A B {left: A right: B})";
+    assert_eq!(
+        check(&format!("{source} (pub fn f [p: Pair Int String] -> String p.left)")),
+        vec!["type-mismatch"]
+    );
+    assert!(
+        check(&format!("{source} (pub fn f [p: Pair Int String] -> Int p.left)")).is_empty(),
+        "and the right one checks"
+    );
+}

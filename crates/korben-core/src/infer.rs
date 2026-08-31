@@ -468,7 +468,7 @@ impl Checker {
             "Option".to_string(),
             EnumTable {
                 variants: vec![
-                    ("Some".to_string(), vec![("value".to_string(), Type::Unknown)]),
+                    ("Some".to_string(), vec![("value".to_string(), Type::Var(0))]),
                     ("None".to_string(), Vec::new()),
                 ],
             },
@@ -477,8 +477,8 @@ impl Checker {
             "Result".to_string(),
             EnumTable {
                 variants: vec![
-                    ("Ok".to_string(), vec![("value".to_string(), Type::Unknown)]),
-                    ("Err".to_string(), vec![("error".to_string(), Type::Unknown)]),
+                    ("Ok".to_string(), vec![("value".to_string(), Type::Var(0))]),
+                    ("Err".to_string(), vec![("error".to_string(), Type::Var(1))]),
                 ],
             },
         );
@@ -1062,22 +1062,31 @@ impl Checker {
     fn register_constructors(&mut self, decl: &Rc<TypeDecl>) {
         let params = decl.params.clone();
         let qualified = crate::scope::qualify(&self.module, &decl.name);
-        let result =
-            Type::Con(Rc::from(qualified.as_str()), params.iter().map(|_| Type::Unknown).collect());
+        // korben-msz
+        // The declared type applied to its own parameters, and a scheme that
+        // binds them, so each use site gets fresh ones and the argument
+        // decides what they are. These used to be `Unknown` in a monomorphic
+        // scheme, which is why `(Full 1)` and `(Full "one")` produced the same
+        // unconstrained type.
+        let result = Type::Con(
+            Rc::from(qualified.as_str()),
+            (0..params.len()).map(|index| Type::Var(index as u32)).collect(),
+        );
+        let bound: Vec<u32> = (0..params.len() as u32).collect();
         match &decl.body {
             TypeBody::Record(fields) => {
                 let param_types: Vec<Type> =
                     fields.iter().map(|(_, ty, _)| self.lower_type(ty, &params)).collect();
                 self.globals.insert(
                     qualified.clone(),
-                    Scheme::mono(Type::function(param_types, result, Effects::NONE)),
+                    Scheme { vars: bound, ty: Type::function(param_types, result, Effects::NONE) },
                 );
             }
             TypeBody::Newtype(inner) => {
                 let inner = self.lower_type(inner, &params);
                 self.globals.insert(
                     qualified.clone(),
-                    Scheme::mono(Type::function(vec![inner], result, Effects::NONE)),
+                    Scheme { vars: bound, ty: Type::function(vec![inner], result, Effects::NONE) },
                 );
             }
             TypeBody::Enum(variants) => {
@@ -1087,10 +1096,13 @@ impl Checker {
                         .iter()
                         .map(|(_, ty, _)| self.lower_type(ty, &params))
                         .collect();
-                    let scheme = if param_types.is_empty() {
-                        Scheme::mono(result.clone())
-                    } else {
-                        Scheme::mono(Type::function(param_types, result.clone(), Effects::NONE))
+                    let scheme = Scheme {
+                        vars: bound.clone(),
+                        ty: if param_types.is_empty() {
+                            result.clone()
+                        } else {
+                            Type::function(param_types, result.clone(), Effects::NONE)
+                        },
                     };
                     self.globals.insert(crate::scope::qualify(&self.module, &variant.name), scheme);
                 }
@@ -1125,9 +1137,17 @@ impl Checker {
     fn lower_type(&mut self, ty: &TypeExpr, params: &[String]) -> Type {
         match ty {
             TypeExpr::Name(name, args, span) => {
-                if params.iter().any(|param| param == name) {
-                    // Type parameters are opaque during checking.
-                    return Type::Unknown;
+                // korben-msz
+                // A type parameter is the bound variable at its position --
+                // the convention `Some` and `Ok` already use. It used to lower
+                // to `Unknown`, which unifies with anything, so every generic
+                // declaration was unchecked inside: a payload bound by a
+                // pattern, a field read off a parametric record, the body of a
+                // generic function. Whatever is read out of one of these must
+                // be instantiated first; reading it raw would alias a real
+                // inference variable.
+                if let Some(index) = params.iter().position(|param| param == name) {
+                    return Type::Var(index as u32);
                 }
                 let args: Vec<Type> = args.iter().map(|arg| self.lower_type(arg, params)).collect();
                 let short = name.rsplit(['.', '/']).next().unwrap_or(name).to_string();
@@ -1890,9 +1910,38 @@ impl Checker {
                     Type::Unknown
                 }
             },
-            Type::Con(type_name, _) => self.nominal_field(&type_name, name, span),
+            // korben-msz
+            Type::Con(type_name, args) => {
+                let field = self.nominal_field(&type_name, name, span);
+                self.with_arguments(&type_name, &args, field)
+            }
             _ => Type::Unknown,
         }
+    }
+
+    // korben-msz
+    /// Resolve a declared type's parameters against the arguments a value of
+    /// it carries.
+    ///
+    /// A field type declared as a parameter is the bound variable at that
+    /// position. Handing it back unresolved would be worse than saying
+    /// nothing: a bound variable read into an inference context aliases a real
+    /// inference variable, so `p.left` on a `Pair Int String` would bind to
+    /// whatever the surrounding code wanted and agree with all of it.
+    fn with_arguments(&mut self, type_name: &str, args: &[Type], field: Type) -> Type {
+        let arity = self.type_params.get(type_name).map(|params| params.len()).unwrap_or(0);
+        if arity == 0 {
+            return field;
+        }
+        let mut mapping = HashMap::new();
+        for index in 0..arity {
+            // A value whose arguments the checker never settled contributes
+            // nothing, which leaves the field as unknown rather than as a
+            // variable that would quietly agree with anything.
+            let argument = args.get(index).cloned().unwrap_or(Type::Unknown);
+            mapping.insert(index as u32, argument);
+        }
+        substitute(&field, &mapping)
     }
 
     fn nominal_field(&mut self, type_name: &str, name: &str, span: Span) -> Type {
@@ -2035,8 +2084,8 @@ impl Checker {
                     })
                     .map(|(_, fields)| fields)
                     .unwrap_or_default();
-                // korben-6nt
-                let fields = self.carried_payload(&owner, name, value).unwrap_or(declared);
+                // korben-msz
+                let fields = self.instantiate_variant(&owner, declared, value, *span);
                 if !positional.is_empty() && positional.len() != fields.len() && !fields.is_empty()
                 {
                     self.diagnostics.push(
@@ -2081,48 +2130,64 @@ impl Checker {
         }
     }
 
-    // korben-6nt
-    /// The payload type a pattern on `Option` or `Result` should bind.
+    // korben-msz
+    /// The field types a variant pattern binds, with the owning type's
+    /// parameters resolved against the type actually being matched.
     ///
-    /// Taken from the type being matched, not from the declaration. Declared
-    /// payloads are `Unknown` for every parametric type, because `lower_type`
-    /// erases type parameters -- so `(Ok data)` used to bind `data` as
-    /// `Unknown`, which unifies with anything. That is what let a false
-    /// annotation stand on any value that had been through a `Result`, which
-    /// is every value that comes from the outside world.
+    /// Declared field types name parameters as bound variables, so reading
+    /// them straight out of the table would alias real inference variables.
+    /// They are instantiated first: fresh variables for the owner's
+    /// parameters, the owner applied to those unified with the scrutinee -- so
+    /// that matching `Result Int String` decides them -- and the field types
+    /// rewritten through the same mapping.
     ///
-    /// These two are special-cased rather than fixed in general because the
-    /// general fix is real parametric variants, which is a larger change. For
-    /// `Option` and `Result` the answer is sitting in the scrutinee, and
-    /// losing it was never necessary.
-    fn carried_payload(
+    /// This replaces the `Option` and `Result` special case from korben-6nt.
+    /// That one read the payload straight out of the scrutinee, which only
+    /// worked because those two are shaped so simply; this works for anything
+    /// declared with parameters.
+    fn instantiate_variant(
         &mut self,
         owner: &str,
-        variant: &str,
+        declared: Vec<(String, Type)>,
         scrutinee: &Type,
-    ) -> Option<Vec<(String, Type)>> {
-        let Type::Con(name, args) = self.prune(scrutinee) else { return None };
-        if &*name != owner {
-            return None;
+        span: Span,
+    ) -> Vec<(String, Type)> {
+        let arity = self.type_params.get(owner).map(|params| params.len()).unwrap_or(0);
+        if arity == 0 {
+            return declared;
         }
-        let carried = match (owner, variant) {
-            ("Option", "Some") | ("Result", "Ok") => args.first()?,
-            ("Result", "Err") => args.get(1)?,
-            _ => return None,
-        };
-        let field = if variant == "Err" { "error" } else { "value" };
-        Some(vec![(field.to_string(), carried.clone())])
+        let mut mapping = HashMap::new();
+        let mut args = Vec::with_capacity(arity);
+        for index in 0..arity {
+            let fresh = self.fresh();
+            mapping.insert(index as u32, fresh.clone());
+            args.push(fresh);
+        }
+        // Matching is what pins the parameters down. A scrutinee the checker
+        // has not settled yet is left alone rather than forced: `expect` would
+        // report a mismatch the pattern did not cause.
+        let applied = Type::Con(Rc::from(owner), args);
+        if !matches!(self.prune(scrutinee), Type::Unknown | Type::Var(_)) {
+            self.expect(&applied, scrutinee, span, "in a pattern");
+        } else {
+            let _ = self.unify(&applied, scrutinee);
+        }
+        declared.into_iter().map(|(name, ty)| (name, substitute(&ty, &mapping))).collect()
     }
 
     /// Field lookup used by patterns, which must not complain about maps.
     fn field_type_quiet(&mut self, target: &Type, name: &str) -> Type {
         match self.prune(target) {
             Type::Record(record) => record.fields.get(name).cloned().unwrap_or(Type::Unknown),
-            Type::Con(type_name, _) => self
-                .records
-                .get(&type_name.to_string())
-                .and_then(|table| table.fields.get(name).cloned())
-                .unwrap_or(Type::Unknown),
+            // korben-msz
+            Type::Con(type_name, args) => {
+                let field = self
+                    .records
+                    .get(&type_name.to_string())
+                    .and_then(|table| table.fields.get(name).cloned())
+                    .unwrap_or(Type::Unknown);
+                self.with_arguments(&type_name, &args, field)
+            }
             _ => Type::Unknown,
         }
     }
