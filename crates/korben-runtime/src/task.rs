@@ -97,6 +97,10 @@ thread_local! {
     /// do about it -- instead of the scheduler reporting a generic stall from
     /// somewhere that knows nothing about why.
     static STUCK: Cell<bool> = const { Cell::new(false) };
+
+    // korben-8fl.8
+    /// What is left of the running task's turn.
+    static BUDGET: Cell<u32> = const { Cell::new(YIELD_BUDGET) };
 }
 
 // korben-5wu
@@ -399,6 +403,38 @@ fn settle(task: &Rc<TaskCell>, outcome: Outcome) -> Outcome {
 /// decide here.
 pub(crate) fn park_now() -> bool {
     park()
+}
+
+// korben-8fl.8
+/// How much a task may do before it owes everyone else a turn.
+///
+/// Counted in interpreter steps and in calls made by generated code, not in
+/// time: a step count is deterministic, and korben's interpreted and native
+/// modes are required to agree byte for byte. A clock would make the
+/// interleaving depend on the machine.
+const YIELD_BUDGET: u32 = 4_096;
+
+// korben-8fl.8
+/// Give the rest of the scheduler a turn if this task has had a long one.
+///
+/// Suspension alone does not make a CPU-bound handler fair: a loop with no
+/// await point has nowhere to park, so one request could hold the whole
+/// server -- which is the outage korben-8fl.8 recorded. The yield points are
+/// inserted rather than waited for, here and at the head of every generated
+/// function.
+///
+/// Yielding counts as progress. A task that parks here is not waiting for
+/// anything, and without saying so the scheduler would find a round in which
+/// nothing moved and call it a deadlock.
+pub fn maybe_yield() {
+    let left = BUDGET.with(|budget| budget.get());
+    if left > 0 {
+        BUDGET.with(|budget| budget.set(left - 1));
+        return;
+    }
+    BUDGET.with(|budget| budget.set(YIELD_BUDGET));
+    note_progress();
+    park();
 }
 
 // korben-5wu

@@ -391,3 +391,46 @@ fn tasks_waiting_on_different_sockets_are_served_as_their_peers_arrive() {
     assert_eq!(early, "second", "the second listener answered first");
     assert_eq!(late, "first");
 }
+
+// korben-8fl.8
+/// A task that does nothing but compute still gives others a turn.
+///
+/// Suspension alone did not make this fair. A handler with no await point had
+/// nowhere to park, so one CPU-bound request could hold the whole server --
+/// measured as an entire service, including a near-zero-cost health endpoint,
+/// unresponsive for minutes. Yield points are inserted at the two places a
+/// task can spend unbounded time without blocking: a loop, and a call.
+///
+/// The assertion is interleaving. `busy` prints only at its start and end, so
+/// if `quick` ran only after it finished, the two lines would bracket
+/// everything -- which is exactly what happened before.
+#[test]
+fn a_computing_task_yields_to_another() {
+    let result = run(&format!(
+        "{HEADER}
+(async fn busy [] -> Int !async !io
+  (println \"busy starts\")
+  (let total (loop [n 0 acc 0]
+    (if (>= n 200000) acc (recur (+ n 1) (+ acc n)))))
+  (println \"busy ends\")
+  total)
+(async fn quick [] -> Int !async !io
+  (println \"quick ran\")
+  1)
+(pub fn main [] -> Unit !io !async
+  (task-scope scope
+    (let slow (spawn scope (busy)))
+    (spawn scope (quick))
+    (println \"total\" (await slow))))"
+    ));
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    let lines: Vec<&str> = result.output.lines().collect();
+    assert_eq!(lines.first(), Some(&"busy starts"));
+    assert_eq!(
+        lines.get(1),
+        Some(&"quick ran"),
+        "the computing task must yield before it finishes: {:?}",
+        lines
+    );
+    assert_eq!(lines.get(2), Some(&"busy ends"));
+}

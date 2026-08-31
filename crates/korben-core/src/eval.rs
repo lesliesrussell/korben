@@ -375,6 +375,9 @@ impl Interp {
                     values.push(self.eval(expr, env)?);
                 }
                 loop {
+                    // korben-8fl.8: a loop is one of the two ways to spend
+                    // unbounded time without ever blocking.
+                    korben_runtime::task::maybe_yield();
                     let scope = env.child();
                     for ((name, _), value) in bindings.iter().zip(values.iter()) {
                         scope.define(Rc::from(name.as_str()), value.clone());
@@ -608,6 +611,8 @@ impl Interp {
     }
 
     fn call_closure(&self, closure: &Rc<Closure>, args: Vec<RtArg>, span: Span) -> EvalResult {
+        // korben-8fl.8: and recursion is the other.
+        korben_runtime::task::maybe_yield();
         self.depth.set(self.depth.get() + 1);
         if self.depth.get() > self.max_depth.get() {
             self.depth.set(self.depth.get() - 1);
