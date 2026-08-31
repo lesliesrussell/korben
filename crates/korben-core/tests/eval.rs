@@ -462,3 +462,33 @@ fn a_method_keyword_is_a_value_not_a_parameter_name() {
     assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
     assert_eq!(result.output.trim_end().lines().collect::<Vec<_>>(), [":post", "/p", "x"]);
 }
+
+// korben-b13
+/// Specialised integer arithmetic must answer exactly what the general path
+/// answers -- including where it declines to specialise.
+#[test]
+fn specialised_arithmetic_agrees_with_the_general_path() {
+    // Typed Int: the fast path.
+    assert_eq!(eval("(+ 2 3)"), "5");
+    assert_eq!(eval("(- 10 4)"), "6");
+    assert_eq!(eval("(* 6 7)"), "42");
+    // Negative and zero operands.
+    assert_eq!(eval("(+ -5 5)"), "0");
+    assert_eq!(eval("(* -6 7)"), "-42");
+    // Floats are not specialised and still promote.
+    assert_eq!(eval("(+ 1.5 2.25)"), "3.75");
+    // Mixing promotes, and stays a Float rather than printing as an Int.
+    assert_eq!(eval("(* 2 1.5)"), "3.0");
+    // The variadic fold is left to the general path.
+    assert_eq!(eval("(+ 1 2 3 4)"), "10");
+}
+
+// korben-b13
+/// Overflow is delegated to the general path rather than reimplemented, so
+/// the fault is the runtime's own and cannot drift from it.
+#[test]
+fn specialised_arithmetic_still_faults_on_overflow() {
+    let result = run("(fn f [a: Int b: Int] -> Int (* a b))
+                      (fn main [] -> Unit !io (println (f 9223372036854775807 2)))");
+    assert_eq!(result.diagnostics, vec!["overflow"]);
+}
