@@ -643,6 +643,17 @@ impl Checker {
             Scheme::mono(Type::function(Vec::new(), Type::bool(), io)),
         );
 
+        // --- std.net ----------------------------------------------------
+        // korben-ggd
+        define(
+            "std.net/connect-tls",
+            Scheme::mono(Type::function(
+                vec![string.clone()],
+                Type::result(Type::con("Connection"), string.clone()),
+                io,
+            )),
+        );
+
         // --- std.json ---------------------------------------------------
         // `decode` is deliberately absent: it answers with whatever the text
         // held, and korben has no type for that yet. See korben-6nt.

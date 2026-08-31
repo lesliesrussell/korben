@@ -34,14 +34,92 @@ use std::net::{TcpListener, TcpStream};
 const READ_CHUNK: usize = 64 * 1024;
 
 type ListenerHandle = RefCell<Option<TcpListener>>;
-type ConnectionHandle = RefCell<Option<TcpStream>>;
+// korben-ggd
+/// What a connection is carried over.
+///
+/// Plain TCP, or the same socket with TLS on top. The variants differ in one
+/// way that matters to the code below: a plain socket is read without blocking
+/// so the runtime can drive other work while it waits, and a TLS stream is
+/// not. rustls buffers whole records, so a read that returns `WouldBlock`
+/// part-way through one has to be resumed with the same state -- which the
+/// loop here is not written for. A TLS read therefore blocks the runtime until
+/// it answers.
+///
+/// That is honest for what TLS is used for today, which is `get-url`: it asks
+/// once, reads to the end, and closes. It would not be honest for a server, so
+/// there is not one.
+pub enum Wire {
+    Plain(TcpStream),
+    #[cfg(feature = "tls")]
+    Tls(Box<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>),
+}
+
+impl Wire {
+    /// The socket underneath, whatever is layered on it.
+    fn socket(&self) -> &TcpStream {
+        match self {
+            Wire::Plain(stream) => stream,
+            #[cfg(feature = "tls")]
+            Wire::Tls(stream) => stream.get_ref(),
+        }
+    }
+
+    /// Whether reads on this wire may return before they have an answer.
+    fn can_yield(&self) -> bool {
+        matches!(self, Wire::Plain(_))
+    }
+
+    fn set_nonblocking(&self, on: bool) -> std::io::Result<()> {
+        // A TLS stream stays blocking; see the note on `Wire`.
+        self.socket().set_nonblocking(on && self.can_yield())
+    }
+
+    fn shutdown(&self, how: std::net::Shutdown) -> std::io::Result<()> {
+        self.socket().shutdown(how)
+    }
+
+    fn peer_addr(&self) -> std::io::Result<std::net::SocketAddr> {
+        self.socket().peer_addr()
+    }
+}
+
+impl std::io::Read for Wire {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Wire::Plain(stream) => stream.read(buffer),
+            #[cfg(feature = "tls")]
+            Wire::Tls(stream) => stream.read(buffer),
+        }
+    }
+}
+
+impl std::io::Write for Wire {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Wire::Plain(stream) => stream.write(buffer),
+            #[cfg(feature = "tls")]
+            Wire::Tls(stream) => stream.write(buffer),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Wire::Plain(stream) => stream.flush(),
+            #[cfg(feature = "tls")]
+            Wire::Tls(stream) => stream.flush(),
+        }
+    }
+}
+
+type ConnectionHandle = RefCell<Option<Wire>>;
 
 pub fn listener_value(listener: TcpListener) -> Value {
     Foreign::wrap("Listener", RefCell::new(Some(listener)))
 }
 
 pub fn connection_value(stream: TcpStream) -> Value {
-    Foreign::wrap("Connection", RefCell::new(Some(stream)))
+    // korben-ggd: a plain socket is one kind of wire; TLS is the other.
+    Foreign::wrap("Connection", RefCell::new(Some(Wire::Plain(stream))))
 }
 
 fn as_listener(value: &Value) -> Option<&ListenerHandle> {
@@ -100,6 +178,83 @@ pub fn listen(address: &str) -> Outcome {
         Ok(listener) => Value::ok(listener_value(listener)),
         Err(error) => Value::err(crate::std::io_error(address, &error)),
     })
+}
+
+// korben-ggd
+/// Open a TLS connection.
+///
+/// The name to verify the certificate against is the host part of `address`,
+/// which is what a client asking for `https://example.com/` means. Verifying
+/// against anything else -- an IP the name resolved to, or a name the caller
+/// supplied separately -- is how TLS gets accidentally disabled, so it is not
+/// offered.
+///
+/// Roots come from `webpki-roots`, the Mozilla set compiled in. A bundled set
+/// is reproducible and needs no platform store, which is what `korben build`
+/// being offline requires; the cost is that it ages with the toolchain rather
+/// than with the machine.
+#[cfg(feature = "tls")]
+pub fn connect_tls(address: &str) -> Outcome {
+    use std::sync::Arc;
+
+    let host = match address.rsplit_once(':') {
+        Some((host, _)) => host,
+        None => address,
+    };
+    let server_name = match rustls::pki_types::ServerName::try_from(host.to_string()) {
+        Ok(name) => name,
+        Err(_) => {
+            return Ok(Value::err(Value::str(format!(
+                "`{host}` is not a name a certificate can be checked against"
+            ))))
+        }
+    };
+
+    let stream = match TcpStream::connect(address) {
+        Ok(stream) => stream,
+        Err(error) => return Ok(Value::err(crate::std::io_error(address, &error))),
+    };
+
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let config = match rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    {
+        Ok(builder) => builder.with_root_certificates(roots).with_no_client_auth(),
+        Err(error) => return Ok(Value::err(Value::str(error.to_string()))),
+    };
+
+    let mut session = match rustls::ClientConnection::new(Arc::new(config), server_name) {
+        Ok(session) => session,
+        Err(error) => return Ok(Value::err(Value::str(error.to_string()))),
+    };
+
+    // The handshake is completed here rather than left to the first read.
+    // rustls performs it lazily, so without this a connection to something
+    // that is not a TLS server -- or one presenting a certificate for another
+    // name -- would be handed back as `Ok` and only fail later, somewhere that
+    // reads like an I/O problem. An answer about whether a secure connection
+    // was established should come from the call that establishes it.
+    let mut stream = stream;
+    while session.is_handshaking() {
+        if let Err(error) = session.complete_io(&mut stream) {
+            return Ok(Value::err(crate::std::io_error(address, &error)));
+        }
+    }
+
+    Ok(Value::ok(Foreign::wrap(
+        "Connection",
+        RefCell::new(Some(Wire::Tls(Box::new(rustls::StreamOwned::new(session, stream))))),
+    )))
+}
+
+/// Without the `tls` feature there is no TLS, and saying so is better than
+/// quietly opening an unencrypted connection to a port expecting one.
+#[cfg(not(feature = "tls"))]
+pub fn connect_tls(_address: &str) -> Outcome {
+    Ok(Value::err(Value::str("this build has no TLS: rebuild the runtime with the `tls` feature")))
 }
 
 pub fn connect(address: &str) -> Outcome {

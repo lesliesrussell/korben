@@ -114,17 +114,20 @@ fn a_handler_with_the_wrong_shape_is_a_type_error() {
     assert_eq!(codes, vec!["type-mismatch"]);
 }
 
+// korben-ggd
 #[test]
 fn the_client_rejects_a_scheme_it_cannot_speak() {
+    // `https` is spoken now, so this asks about one that is not. The scheme is
+    // named back, which the old message did not do.
     let result = run(&format!(
         "{HEADER}
 (pub fn main [] -> Unit !io
-  (match (http.get-url \"https://example.test/\")
+  (match (http.get-url \"gopher://example.test/\")
     (Ok response) (println response.status)
     (Err error) (println (http.describe error))))"
     ));
     assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
-    assert_eq!(result.output, "only http:// is supported\n");
+    assert_eq!(result.output, "only http:// and https:// are supported, not gopher://\n");
 }
 
 #[test]

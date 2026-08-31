@@ -361,7 +361,12 @@ Not yet implemented, and reported as such rather than stubbed silently:
   `--target` just gained, and it puts foreign calls and panics on a hand-managed
   stack. The transform is portable and safe, and the differential tests already
   exist to keep the two execution modes identical through it.
-- **TLS.** `std.http` speaks `http://` only; `https://` needs `std.crypto`.
+- **TLS.** `std.http` speaks `https://` as a client, verifying the certificate
+  against the host in the URL. It is opt-in: a program that uses it turns on
+  the runtime's `tls` feature and its first build fetches `rustls`, while a
+  program that does not keeps a dependency-free, offline build. The server does
+  not do TLS, and a TLS read blocks the runtime rather than yielding to other
+  work.
 - **Lifetime inference.** Ownership tracks moves flow-sensitively and reports
   use-after-move, possible moves across branches, moves inside a loop, cloning a
   resource, exclusive-borrow aliasing, borrows crossing a task boundary, and
@@ -434,7 +439,7 @@ is ready. All ten hold today:
 | 10 | Reproduce the build from a lockfile without install scripts | `examples/packages/`, `korben audit` |
 
 What that does *not* mean is that the specification is finished: parallelism, a
-package registry, and TLS are all still ahead.
+package registry are still ahead; TLS arrived as an opt-in client.
 
 ## Repository layout
 

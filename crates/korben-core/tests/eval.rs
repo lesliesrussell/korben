@@ -492,3 +492,81 @@ fn specialised_arithmetic_still_faults_on_overflow() {
                       (fn main [] -> Unit !io (println (f 9223372036854775807 2)))");
     assert_eq!(result.diagnostics, vec!["overflow"]);
 }
+
+// korben-ggd
+/// `https://` used to be refused outright. It is now dialled through TLS, so a
+/// failure to reach the host is a transport failure rather than the scheme
+/// being unsupported. Pointed at a closed local port so nothing here needs a
+/// network.
+#[test]
+fn an_https_url_is_no_longer_refused_for_its_scheme() {
+    let port = {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        probe.local_addr().expect("addr").port()
+    };
+    let result = run(&format!(
+        r#"(module m (use std.http :as http))
+           (fn main [] -> Unit !io
+             (match (http.get-url "https://127.0.0.1:{port}/")
+               (Ok r) (println "connected" r.status)
+               (Err e) (println (http.describe e))))"#
+    ));
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    let output = result.output.trim_end().to_string();
+    assert!(
+        !output.contains("only http"),
+        "https should not be refused for its scheme: {output:?}"
+    );
+    assert!(!output.starts_with("connected"), "nothing is listening: {output:?}");
+}
+
+// korben-ggd
+/// A scheme that is genuinely unsupported still says so, so the check above is
+/// testing that `https` was added rather than that the check was removed.
+#[test]
+fn an_unsupported_scheme_still_says_so() {
+    let result = run(r#"(module m (use std.http :as http))
+           (fn main [] -> Unit !io
+             (match (http.get-url "ftp://example.com/")
+               (Ok _) (println "connected")
+               (Err e) (println (http.describe e))))"#);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert!(
+        result.output.contains("ftp"),
+        "the message should name the scheme: {:?}",
+        result.output
+    );
+}
+
+// korben-ggd
+/// TLS against something that is not TLS must fail rather than fall back to
+/// speaking in the clear.
+#[test]
+fn tls_against_a_plain_socket_fails() {
+    use std::io::Read;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    // Accept once and say nothing that resembles a TLS handshake.
+    let server = std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut scratch = [0u8; 64];
+            let _ = stream.read(&mut scratch);
+        }
+    });
+
+    let result = run(&format!(
+        r#"(module m (use std.net :as net))
+           (fn main [] -> Unit !io
+             (match (net.connect-tls "127.0.0.1:{port}")
+               (Ok _) (println "handshake succeeded")
+               (Err _) (println "refused")))"#
+    ));
+    let _ = server.join();
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    // Connecting may succeed; what must not happen is a usable TLS session.
+    assert!(
+        !result.output.contains("handshake succeeded") || result.output.contains("refused"),
+        "TLS must not be established against a plain socket: {:?}",
+        result.output
+    );
+}
