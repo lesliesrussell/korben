@@ -41,7 +41,11 @@ pub type Loaded = Result<Rc<ModuleRuntime>, ()>;
 
 pub struct Session {
     pub sources: SourceMap,
-    pub interp: Interp,
+    // korben-c9v
+    /// The host, shared. A suspended task's stack owns a handle on this, so it
+    /// has to be reference counted rather than borrowed: the borrow would have
+    /// to outlive the suspend, and the task's own frames hold it.
+    pub interp: Rc<Interp>,
     pub diagnostics: Diagnostics,
     /// Analyzed modules in load order.
     pub modules: Vec<Module>,
@@ -79,7 +83,7 @@ impl Session {
         let manifest = Manifest::default_for("scratch");
         let mut session = Session {
             sources: SourceMap::new(),
-            interp: Interp::new(),
+            interp: Rc::new(Interp::new()),
             diagnostics: Diagnostics::new(),
             modules: Vec::new(),
             root,
@@ -125,7 +129,7 @@ impl Session {
         };
         let mut session = Session {
             sources: SourceMap::new(),
-            interp: Interp::new(),
+            interp: Rc::new(Interp::new()),
             diagnostics: Diagnostics::new(),
             modules: Vec::new(),
             root,
@@ -256,7 +260,7 @@ impl Session {
         let module = self.interp.module(crate::builtins::PRELUDE);
         let previous = self.interp.current.replace(module);
         let mut diagnostics = Diagnostics::new();
-        let remaining = expand_module(&mut self.interp, &forms, &mut diagnostics);
+        let remaining = expand_module(&self.interp, &forms, &mut diagnostics);
         self.diagnostics.extend(diagnostics);
         for form in remaining.iter().filter(|form| !form.is_comment()) {
             self.diagnostics.push(
@@ -310,7 +314,7 @@ impl Session {
             return Ok(self.interp.module(name));
         }
         // Standard library modules are provided natively, not read from disk.
-        if self.interp.modules.contains_key(name) {
+        if self.interp.modules.borrow().contains_key(name) {
             return Ok(self.interp.module(name));
         }
         // Some of the standard library is written in Korben and embedded.
@@ -456,7 +460,7 @@ impl Session {
         let previous = self.interp.current.replace(runtime.clone());
 
         let mut diagnostics = Diagnostics::new();
-        let expanded = expand_module(&mut self.interp, &forms, &mut diagnostics);
+        let expanded = expand_module(&self.interp, &forms, &mut diagnostics);
         let module = lower_module(file, &name, &expanded, &mut diagnostics);
         self.diagnostics.extend(diagnostics);
 
@@ -499,7 +503,9 @@ impl Session {
             }
             runtime.aliases.borrow_mut().insert(import.alias.clone(), import.path.clone());
             let Some(names) = &import.names else { continue };
-            let Some(source) = self.interp.modules.get(&import.path) else { continue };
+            let Some(source) = self.interp.modules.borrow().get(&import.path).cloned() else {
+                continue;
+            };
             for name in names {
                 if !source.exports.borrow().contains_key(name) {
                     let private = source.globals.borrow().contains_key(name);
@@ -537,11 +543,14 @@ impl Session {
                     let methods: Vec<String> =
                         decl.methods.iter().map(|method| method.name.clone()).collect();
                     for method in &methods {
-                        self.interp.method_owner.insert(method.clone(), decl.name.clone());
+                        self.interp
+                            .method_owner
+                            .borrow_mut()
+                            .insert(method.clone(), decl.name.clone());
                         let dispatcher = Value::method(&decl.name, method);
                         define(runtime, method, dispatcher, decl.is_public);
                     }
-                    self.interp.protocols.insert(decl.name.clone(), methods);
+                    self.interp.protocols.borrow_mut().insert(decl.name.clone(), methods);
                 }
                 Item::Fn(decl) => {
                     let value = closure_value(Rc::new(Closure {
@@ -587,7 +596,7 @@ impl Session {
                     define(runtime, &decl.name, value, decl.is_public);
                 }
                 Item::Test(decl) => {
-                    self.interp.tests.push((
+                    self.interp.tests.borrow_mut().push((
                         module.name.clone(),
                         decl.name.clone(),
                         decl.clone(),
@@ -607,6 +616,7 @@ impl Session {
                         }
                         self.interp
                             .impls
+                            .borrow_mut()
                             .entry((protocol.clone(), decl.type_name.clone()))
                             .or_default();
                     }
@@ -617,7 +627,7 @@ impl Session {
         // Implementations need their protocol registered first.
         for item in &module.items {
             if let Item::Impl(decl) = item {
-                if !self.interp.protocols.contains_key(&decl.protocol) {
+                if !self.interp.protocols.borrow().contains_key(&decl.protocol) {
                     self.diagnostics.push(
                         Diagnostic::error(format!("unknown protocol `{}`", decl.protocol))
                             .with_code("unknown-protocol")
@@ -634,7 +644,7 @@ impl Session {
                     }));
                     methods.insert(method.name.clone(), value);
                 }
-                if let Some(expected) = self.interp.protocols.get(&decl.protocol) {
+                if let Some(expected) = self.interp.protocols.borrow().get(&decl.protocol) {
                     for name in expected {
                         if !methods.contains_key(name) {
                             self.diagnostics.push(
@@ -648,7 +658,10 @@ impl Session {
                         }
                     }
                 }
-                self.interp.impls.insert((decl.protocol.clone(), decl.type_name.clone()), methods);
+                self.interp
+                    .impls
+                    .borrow_mut()
+                    .insert((decl.protocol.clone(), decl.type_name.clone()), methods);
             }
         }
         // Constants run last: their initializers may call anything above.
@@ -672,7 +685,7 @@ impl Session {
             TypeBody::Record(fields) => {
                 let names: Vec<Sym> =
                     fields.iter().map(|(name, _, _)| Rc::from(name.as_str())).collect();
-                self.interp.types.insert(
+                self.interp.types.borrow_mut().insert(
                     decl.name.clone(),
                     Rc::new(TypeInfo {
                         name: decl.name.clone(),
@@ -694,7 +707,10 @@ impl Session {
                         variant.name.clone(),
                         names.iter().map(|name| name.to_string()).collect::<Vec<_>>(),
                     ));
-                    self.interp.variant_owner.insert(variant.name.clone(), decl.name.clone());
+                    self.interp
+                        .variant_owner
+                        .borrow_mut()
+                        .insert(variant.name.clone(), decl.name.clone());
                     let value = if names.is_empty() {
                         // A payload-free variant is a value, so `None` needs no call.
                         Value::variant(&decl.name, &variant.name, Vec::new())
@@ -704,7 +720,7 @@ impl Session {
                     };
                     define(runtime, &variant.name, value, decl.is_public);
                 }
-                self.interp.types.insert(
+                self.interp.types.borrow_mut().insert(
                     decl.name.clone(),
                     Rc::new(TypeInfo {
                         name: decl.name.clone(),
@@ -715,7 +731,7 @@ impl Session {
                 );
             }
             TypeBody::Newtype(_) => {
-                self.interp.types.insert(
+                self.interp.types.borrow_mut().insert(
                     decl.name.clone(),
                     Rc::new(TypeInfo {
                         name: decl.name.clone(),
@@ -729,7 +745,7 @@ impl Session {
                 define(runtime, &decl.name, ctor, decl.is_public);
             }
             TypeBody::Alias(_) => {
-                self.interp.types.insert(
+                self.interp.types.borrow_mut().insert(
                     decl.name.clone(),
                     Rc::new(TypeInfo {
                         name: decl.name.clone(),
@@ -756,7 +772,7 @@ impl Session {
             let runtime = self.interp.module(&name);
             let previous = self.interp.current.replace(runtime.clone());
             let mut diagnostics = Diagnostics::new();
-            let expanded = expand_module(&mut self.interp, &forms, &mut diagnostics);
+            let expanded = expand_module(&self.interp, &forms, &mut diagnostics);
             let module = lower_module(file, &name, &expanded, &mut diagnostics);
             self.diagnostics.extend(diagnostics);
             self.wire_imports(&module, &runtime);

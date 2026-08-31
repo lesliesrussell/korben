@@ -11,7 +11,7 @@ use crate::eval::Interp;
 /// The module whose exports are visible from every module without importing.
 pub const PRELUDE: &str = "std.core";
 
-pub fn install(interp: &mut Interp) {
+pub fn install(interp: &Interp) {
     for name in korben_runtime::std::NAMES {
         let Some((module, member)) = name.split_once('/') else { continue };
         let Some(value) = korben_runtime::std::builtin(name) else { continue };
@@ -23,12 +23,12 @@ pub fn install(interp: &mut Interp) {
         ["Cell", "File", "Listener", "Connection", "Pool", "Scope", "Task", "Sender", "Receiver"]
     {
         let module = interp.module(name);
-        interp.modules.insert(name.to_string(), module);
+        interp.modules.borrow_mut().insert(name.to_string(), module);
     }
     // `Drop` is a compiler-known protocol: implementing it makes a type
     // resource-bearing, which is what the ownership analysis keys off.
-    interp.protocols.insert("Drop".to_string(), vec!["drop".to_string()]);
-    interp.method_owner.insert("drop".to_string(), "Drop".to_string());
+    interp.protocols.borrow_mut().insert("Drop".to_string(), vec!["drop".to_string()]);
+    interp.method_owner.borrow_mut().insert("drop".to_string(), "Drop".to_string());
 }
 
 // korben-4io

@@ -39,6 +39,10 @@ impl Output {
     }
 }
 
+/// A test the loader registered: its module, its name, its declaration, and
+/// the module runtime to run it against.
+pub type RegisteredTest = (String, String, Rc<TestDecl>, Rc<ModuleRuntime>);
+
 /// Runtime metadata for a nominal type.
 pub struct TypeInfo {
     pub name: String,
@@ -48,32 +52,32 @@ pub struct TypeInfo {
 }
 
 pub struct Interp {
-    pub modules: HashMap<String, Rc<ModuleRuntime>>,
+    pub modules: RefCell<HashMap<String, Rc<ModuleRuntime>>>,
     // korben-bud
     /// The four fields below move during a call, so they carry their own
     /// mutability and the whole evaluation path can take `&self`. Everything
     /// else here is filled in while loading, before any of it runs.
     pub current: RefCell<Rc<ModuleRuntime>>,
-    pub types: HashMap<String, Rc<TypeInfo>>,
+    pub types: RefCell<HashMap<String, Rc<TypeInfo>>>,
     /// Variant constructor name to owning enum type.
-    pub variant_owner: HashMap<String, String>,
-    pub protocols: HashMap<String, Vec<String>>,
+    pub variant_owner: RefCell<HashMap<String, String>>,
+    pub protocols: RefCell<HashMap<String, Vec<String>>>,
     /// `(protocol, type)` to method implementations.
-    pub impls: HashMap<(String, String), HashMap<String, Value>>,
+    pub impls: RefCell<HashMap<(String, String), HashMap<String, Value>>>,
     /// Method name to the protocol that declares it.
-    pub method_owner: HashMap<String, String>,
+    pub method_owner: RefCell<HashMap<String, String>>,
     pub out: RefCell<Output>,
     depth: Cell<usize>,
     /// Maximum call depth before reporting recursion as a fault. The default is
     /// conservative for a standard 2 MiB stack; the CLI raises it after moving
     /// evaluation onto a thread with a much larger stack.
-    pub max_depth: usize,
+    pub max_depth: Cell<usize>,
     /// Names of tests registered by loaded modules.
-    pub tests: Vec<(String, String, Rc<TestDecl>, Rc<ModuleRuntime>)>,
+    pub tests: RefCell<Vec<RegisteredTest>>,
     /// True while running inside `unsafe`, for diagnostics.
     pub in_unsafe: Cell<bool>,
     /// Macros visible during expansion, keyed by name.
-    pub macros: HashMap<String, Rc<crate::expand::MacroEntry>>,
+    pub macros: RefCell<HashMap<String, Rc<crate::expand::MacroEntry>>>,
 }
 
 /// The runtime calls back into the interpreter through this trait: it owns
@@ -110,31 +114,31 @@ impl Interp {
         let root = Rc::new(ModuleRuntime::new("user"));
         let mut modules = HashMap::new();
         modules.insert("user".to_string(), root.clone());
-        let mut interp = Interp {
-            modules,
+        let interp = Interp {
+            modules: RefCell::new(modules),
             current: RefCell::new(root),
-            types: HashMap::new(),
-            variant_owner: HashMap::new(),
-            protocols: HashMap::new(),
-            impls: HashMap::new(),
-            method_owner: HashMap::new(),
+            types: RefCell::new(HashMap::new()),
+            variant_owner: RefCell::new(HashMap::new()),
+            protocols: RefCell::new(HashMap::new()),
+            impls: RefCell::new(HashMap::new()),
+            method_owner: RefCell::new(HashMap::new()),
             out: RefCell::new(Output::Stdout),
             depth: Cell::new(0),
-            max_depth: 128,
-            tests: Vec::new(),
+            max_depth: Cell::new(128),
+            tests: RefCell::new(Vec::new()),
             in_unsafe: Cell::new(false),
-            macros: HashMap::new(),
+            macros: RefCell::new(HashMap::new()),
         };
-        crate::builtins::install(&mut interp);
+        crate::builtins::install(&interp);
         interp
     }
 
-    pub fn module(&mut self, name: &str) -> Rc<ModuleRuntime> {
-        if let Some(module) = self.modules.get(name) {
+    pub fn module(&self, name: &str) -> Rc<ModuleRuntime> {
+        if let Some(module) = self.modules.borrow().get(name) {
             return module.clone();
         }
         let module = Rc::new(ModuleRuntime::new(name));
-        self.modules.insert(name.to_string(), module.clone());
+        self.modules.borrow_mut().insert(name.to_string(), module.clone());
         module
     }
 
@@ -146,14 +150,14 @@ impl Interp {
         }
         let imported = module.imported.borrow().get(name).cloned();
         if let Some((source, original)) = imported {
-            if let Some(source) = self.modules.get(&source) {
+            if let Some(source) = self.modules.borrow().get(&source) {
                 if let Some(value) = source.exports.borrow().get(&original) {
                     return Some(value.clone());
                 }
             }
         }
         // Every module sees the prelude without importing it.
-        self.modules.get(crate::builtins::PRELUDE)?.exports.borrow().get(name).cloned()
+        self.modules.borrow().get(crate::builtins::PRELUDE)?.exports.borrow().get(name).cloned()
     }
 
     /// Resolve `alias.name` / `alias/name` against imports and known modules.
@@ -164,14 +168,10 @@ impl Interp {
             .borrow()
             .get(alias)
             .cloned()
-            .or_else(|| self.modules.contains_key(alias).then(|| alias.to_string()))?;
-        let module = self.modules.get(&target)?;
-        module
-            .exports
-            .borrow()
-            .get(name)
-            .cloned()
-            .or_else(|| module.globals.borrow().get(name).cloned())
+            .or_else(|| self.modules.borrow().contains_key(alias).then(|| alias.to_string()))?;
+        let module = self.modules.borrow().get(&target)?.clone();
+        let exported = module.exports.borrow().get(name).cloned();
+        exported.or_else(|| module.globals.borrow().get(name).cloned())
     }
 
     // --------------------------------------------------------- evaluation
@@ -609,7 +609,7 @@ impl Interp {
 
     fn call_closure(&self, closure: &Rc<Closure>, args: Vec<RtArg>, span: Span) -> EvalResult {
         self.depth.set(self.depth.get() + 1);
-        if self.depth.get() > self.max_depth {
+        if self.depth.get() > self.max_depth.get() {
             self.depth.set(self.depth.get() - 1);
             return Err(Flow::fault(
                 Fault::error("recursion limit reached")
@@ -620,7 +620,7 @@ impl Interp {
         }
 
         let previous_module = self.current.borrow().clone();
-        if let Some(module) = self.modules.get(&*closure.module) {
+        if let Some(module) = self.modules.borrow().get(&*closure.module) {
             *self.current.borrow_mut() = module.clone();
         }
 
@@ -724,8 +724,8 @@ impl Interp {
     /// Find a protocol implementation or a built-in method for a receiver.
     pub fn find_method(&self, receiver: &Value, name: &str) -> Option<Value> {
         let type_name = receiver.type_name();
-        if let Some(protocol) = self.method_owner.get(name) {
-            if let Some(methods) = self.impls.get(&(protocol.clone(), type_name.clone())) {
+        if let Some(protocol) = self.method_owner.borrow().get(name) {
+            if let Some(methods) = self.impls.borrow().get(&(protocol.clone(), type_name.clone())) {
                 if let Some(method) = methods.get(name) {
                     return Some(method.clone());
                 }

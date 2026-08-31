@@ -571,35 +571,50 @@ fn tls_against_a_plain_socket_fails() {
     );
 }
 
-// korben-bud
-/// The point of the `&self` evaluation path, asserted at compile time.
+// korben-bud, korben-c9v
+/// The two prerequisites for a task that suspends, asserted at compile time.
 ///
-/// A task that suspends on its own stack keeps its borrow of the interpreter
-/// alive while the scheduler resumes another task, which needs a borrow of the
-/// same interpreter. Under `&mut dyn Caller` those were two live unique
-/// borrows of one object -- undefined behaviour, and the reason no amount of
-/// scheduler work could have made suspension sound.
+/// `korben-bud`: a task suspended on its own stack keeps its handle on the
+/// host alive while the scheduler resumes another task, which needs its own.
+/// Under `&mut dyn Caller` those were two live unique borrows of one object --
+/// undefined behaviour, and the reason no amount of scheduler work could have
+/// made suspension sound.
 ///
-/// This test would not compile against the old signature. That is the whole
-/// assertion; the writes are here only so the borrows are genuinely used.
+/// `korben-c9v`: a coroutine body must be `'static`, because the coroutine is
+/// stored in a task, in a thread-local scope stack. So it cannot borrow the
+/// host at all -- it has to own a counted handle. This is what keeps the
+/// design free of `unsafe`: the reference the task's frames hold across a
+/// suspend is genuinely alive rather than a laundered lifetime.
+///
+/// Neither half would compile against the old signatures. That is the whole
+/// assertion; the writes are here only so the handles are genuinely used.
 #[test]
-fn the_interpreter_is_reachable_through_two_live_borrows() {
+fn the_host_supports_the_two_handles_a_suspended_task_needs() {
     use korben_core::eval::Output;
     use korben_core::project::Session;
     use korben_core::value::Caller;
+    use std::rc::Rc;
 
-    // Not `mut`: capturing output no longer needs unique access either.
+    // Not `mut`: nothing about running a program needs unique access now.
     let session = Session::bare(std::path::PathBuf::from("."));
     session.interp.out.replace(Output::Captured(String::new()));
 
-    let scheduler: &dyn Caller = &session.interp;
-    let suspended: &dyn Caller = &session.interp;
-    suspended.write("suspended ");
-    scheduler.write("resumed");
+    // korben-bud: two live borrows at once.
+    let scheduler: &dyn Caller = &*session.interp;
+    let suspended: &dyn Caller = &*session.interp;
+    suspended.write("borrowed ");
+    scheduler.write("twice ");
+
+    // korben-c9v: an owned `'static` handle, which is what a coroutine keeps.
+    let owned: Rc<dyn Caller> = session.interp.clone();
+    let task_a = Rc::clone(&owned);
+    let task_b = Rc::clone(&owned);
+    task_a.write("owned ");
+    task_b.write("twice");
 
     let written = match session.interp.out.replace(Output::Stdout) {
         Output::Captured(text) => text,
         Output::Stdout => String::new(),
     };
-    assert_eq!(written, "suspended resumed");
+    assert_eq!(written, "borrowed twice owned twice");
 }

@@ -494,6 +494,7 @@ pub fn lower_session(session: &Session, entry_module: &str) -> Result<Program, V
     let entry = session
         .interp
         .modules
+        .borrow()
         .get(entry_module)
         .filter(|runtime| runtime.globals.borrow().contains_key("main"))
         .map(|_| global_symbol(entry_module, "main"));
@@ -995,7 +996,7 @@ impl<'a> Lowerer<'a> {
         if let Some(slot) = self.lookup_local(name) {
             return Some(Ref::Local(slot));
         }
-        let current = self.interp.modules.get(&self.module)?;
+        let current = self.interp.modules.borrow().get(&self.module)?.clone();
         if let Some(value) = current.globals.borrow().get(name) {
             return Some(self.classify(&self.module.clone(), name, value));
         }
@@ -1010,14 +1011,17 @@ impl<'a> Lowerer<'a> {
         let target = self
             .interp
             .modules
+            .borrow()
             .get(&self.module)
             .and_then(|current| current.aliases.borrow().get(alias).cloned())
-            .or_else(|| self.interp.modules.contains_key(alias).then(|| alias.to_string()))?;
+            .or_else(|| {
+                self.interp.modules.borrow().contains_key(alias).then(|| alias.to_string())
+            })?;
         self.resolve_in(&target, name)
     }
 
     fn resolve_in(&mut self, module: &str, name: &str) -> Option<Ref> {
-        let runtime = self.interp.modules.get(module)?;
+        let runtime = self.interp.modules.borrow().get(module)?.clone();
         let value = runtime
             .exports
             .borrow()
