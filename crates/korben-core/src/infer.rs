@@ -277,6 +277,7 @@ impl Checker {
             chart: None,
         };
         checker.install_builtin_enums();
+        checker.install_runtime_signatures();
         checker.install_prelude_signatures();
         checker
     }
@@ -492,6 +493,197 @@ impl Checker {
         }
         self.type_params.insert("Option".to_string(), vec!["T".to_string()]);
         self.type_params.insert("Result".to_string(), vec!["T".to_string(), "E".to_string()]);
+    }
+
+    // korben-gs0
+    /// Signatures for runtime builtins whose types are not in doubt.
+    ///
+    /// Every builtin used to infer as `Unknown`, so nothing about its
+    /// arguments or its result was checked -- passing a `Vec` to
+    /// `string.upper` was accepted, and so was assigning its result to an
+    /// `Int`. These are keyed by the canonical runtime name that
+    /// `builtins::runtime_name` resolves to.
+    ///
+    /// Deliberately absent: `get`, `assoc`, `dissoc`, `contains?`, `keys` and
+    /// `values`. Those dispatch on the collection -- Map, Record, Variant and
+    /// Vec, each with its own idea of a key -- and cannot be given one
+    /// signature without protocol dispatch. Giving them a wrong one would be
+    /// worse than giving them none. `korben-3cb` covers the map-key case
+    /// specifically until then.
+    fn install_runtime_signatures(&mut self) {
+        let mut define = |name: &str, scheme: Scheme| {
+            self.globals.insert(name.to_string(), scheme);
+        };
+        let (string, int, float, unit) = (Type::string(), Type::int(), Type::float(), Type::unit());
+        let io = Effects(crate::ast::EFFECT_IO);
+
+        // --- std.string -------------------------------------------------
+        for name in ["trim", "upper", "lower"] {
+            define(
+                &format!("std.string/{name}"),
+                Scheme::mono(Type::function(vec![string.clone()], string.clone(), Effects::NONE)),
+            );
+        }
+        for name in ["starts-with?", "ends-with?"] {
+            define(
+                &format!("std.string/{name}"),
+                Scheme::mono(Type::function(
+                    vec![string.clone(), string.clone()],
+                    Type::bool(),
+                    Effects::NONE,
+                )),
+            );
+        }
+        define(
+            "std.string/split",
+            Scheme::mono(Type::function(
+                vec![string.clone(), string.clone()],
+                Type::vec(string.clone()),
+                Effects::NONE,
+            )),
+        );
+        define(
+            "std.string/split-once",
+            Scheme::mono(Type::function(
+                vec![string.clone(), string.clone()],
+                Type::option(Type::vec(string.clone())),
+                Effects::NONE,
+            )),
+        );
+        define(
+            "std.string/join",
+            Scheme::mono(Type::function(
+                vec![Type::vec(string.clone()), string.clone()],
+                string.clone(),
+                Effects::NONE,
+            )),
+        );
+        define(
+            "std.string/replace",
+            Scheme::mono(Type::function(
+                vec![string.clone(), string.clone(), string.clone()],
+                string.clone(),
+                Effects::NONE,
+            )),
+        );
+        define(
+            "std.string/repeat",
+            Scheme::mono(Type::function(
+                vec![string.clone(), int.clone()],
+                string.clone(),
+                Effects::NONE,
+            )),
+        );
+        define(
+            "std.string/chars",
+            Scheme::mono(Type::function(
+                vec![string.clone()],
+                Type::vec(string.clone()),
+                Effects::NONE,
+            )),
+        );
+        define(
+            "std.string/byte-length",
+            Scheme::mono(Type::function(vec![string.clone()], int.clone(), Effects::NONE)),
+        );
+        define(
+            "std.string/parse-int",
+            Scheme::mono(Type::function(
+                vec![string.clone()],
+                Type::result(int.clone(), string.clone()),
+                Effects::NONE,
+            )),
+        );
+        define(
+            "std.string/parse-float",
+            Scheme::mono(Type::function(
+                vec![string.clone()],
+                Type::result(float.clone(), string.clone()),
+                Effects::NONE,
+            )),
+        );
+
+        // --- std.math ---------------------------------------------------
+        define(
+            "std.math/abs",
+            Scheme::mono(Type::function(vec![int.clone()], int.clone(), Effects::NONE)),
+        );
+        for name in ["ceil", "floor"] {
+            define(
+                &format!("std.math/{name}"),
+                Scheme::mono(Type::function(vec![float.clone()], int.clone(), Effects::NONE)),
+            );
+        }
+        for name in ["sqrt", "pow"] {
+            let params = if name == "pow" {
+                vec![float.clone(), float.clone()]
+            } else {
+                vec![float.clone()]
+            };
+            define(
+                &format!("std.math/{name}"),
+                Scheme::mono(Type::function(params, float.clone(), Effects::NONE)),
+            );
+        }
+
+        // --- std.time ---------------------------------------------------
+        define("std.time/now-millis", Scheme::mono(Type::function(Vec::new(), int.clone(), io)));
+        define(
+            "std.time/sleep-millis",
+            Scheme::mono(Type::function(vec![int.clone()], unit.clone(), io)),
+        );
+
+        // --- std.process ------------------------------------------------
+        define(
+            "std.process/args",
+            Scheme::mono(Type::function(Vec::new(), Type::vec(string.clone()), io)),
+        );
+        define(
+            "std.process/env",
+            Scheme::mono(Type::function(vec![string.clone()], Type::option(string.clone()), io)),
+        );
+        define(
+            "std.process/shutdown-requested?",
+            Scheme::mono(Type::function(Vec::new(), Type::bool(), io)),
+        );
+
+        // --- std.json ---------------------------------------------------
+        // `decode` is deliberately absent: it answers with whatever the text
+        // held, and korben has no type for that yet. See korben-6nt.
+        for name in ["encode", "encode-pretty"] {
+            define(
+                &format!("std.json/{name}"),
+                Scheme {
+                    vars: vec![0],
+                    ty: Type::function(vec![Type::Var(0)], string.clone(), Effects::NONE),
+                },
+            );
+        }
+
+        // --- std.fs -----------------------------------------------------
+        // `io_error` builds the failure side, so these answer with `IoError`
+        // rather than a plain string.
+        let io_error = Type::con("IoError");
+        define(
+            "std.fs/read-text",
+            Scheme::mono(Type::function(
+                vec![string.clone()],
+                Type::result(string.clone(), io_error.clone()),
+                io,
+            )),
+        );
+        define(
+            "std.fs/write-text",
+            Scheme::mono(Type::function(
+                vec![string.clone(), string.clone()],
+                Type::result(unit.clone(), io_error.clone()),
+                io,
+            )),
+        );
+        define(
+            "std.fs/exists?",
+            Scheme::mono(Type::function(vec![string.clone()], Type::bool(), io)),
+        );
     }
 
     /// Signatures for the handful of prelude functions worth checking precisely.
@@ -1551,8 +1743,15 @@ impl Checker {
         // A native standard-library module has no declarations to consult, so
         // ask the runtime whether it carries the member.
         let target = self.namespace.module_of(&self.module, alias).unwrap_or(alias).to_string();
-        if crate::builtins::runtime_name(&target, name).is_some() {
-            return Type::Unknown;
+        // korben-gs0
+        // A runtime builtin has no declaration to read, but it may still have
+        // a signature installed by `install_runtime_signatures`. Without one
+        // the call infers as `Unknown` and nothing about it is checked.
+        if let Some(canonical) = crate::builtins::runtime_name(&target, name) {
+            return match self.globals.get(canonical).cloned() {
+                Some(scheme) => self.instantiate(&scheme),
+                None => Type::Unknown,
+            };
         }
         // Neither the module's declarations nor the runtime has it. Say so here
         // rather than leaving it for whichever run first reaches the call.

@@ -417,3 +417,84 @@ fn a_local_binding_named_get_is_not_the_builtin() {
     )
     .is_empty());
 }
+
+// korben-gs0
+#[test]
+fn a_runtime_builtin_checks_its_arguments() {
+    // Every builtin used to infer as `Unknown`, so none of this was caught.
+    assert_eq!(
+        check(
+            r#"(module m (use std.string :as string))
+                 (fn f [v: Vec String] -> String (string.upper v))"#
+        ),
+        vec!["type-mismatch"]
+    );
+    assert_eq!(
+        check(
+            r#"(module m (use std.math :as math))
+                 (fn f [] -> Int (math.abs "not a number"))"#
+        ),
+        vec!["type-mismatch"]
+    );
+}
+
+// korben-gs0
+#[test]
+fn a_runtime_builtin_checks_its_result() {
+    assert_eq!(
+        check(
+            r#"(module m (use std.string :as string))
+                 (fn f [s: String] -> Int (string.upper s))"#
+        ),
+        vec!["type-mismatch"]
+    );
+    // `parse-int` answers with a Result, not a bare Int.
+    assert_eq!(
+        check(
+            r#"(module m (use std.string :as string))
+                 (fn f [s: String] -> Int (string.parse-int s))"#
+        ),
+        vec!["type-mismatch"]
+    );
+}
+
+// korben-gs0
+#[test]
+fn a_runtime_builtin_carries_its_effects() {
+    // Reading a file is `!io`. Effects are inferred privately and required at
+    // a public boundary, so this is reported on a `pub fn` and not on a
+    // private one.
+    assert_eq!(
+        check(
+            r#"(module m (use std.fs :as fs))
+                 (pub fn f [p: String] -> Result String IoError (fs.read-text p))"#
+        ),
+        vec!["undeclared-effect"]
+    );
+    assert!(check(
+        r#"(module m (use std.fs :as fs))
+           (pub fn f [p: String] -> Result String IoError !io (fs.read-text p))"#
+    )
+    .is_empty());
+}
+
+// korben-gs0
+#[test]
+fn correct_uses_of_typed_builtins_stay_quiet() {
+    assert!(check(
+        r#"(module m (use std.string :as string) (use std.math :as math))
+           (fn f [s: String] -> String (string.upper (string.trim s)))
+           (fn g [] -> Int (math.abs -3))
+           (fn h [s: String] -> Vec String (string.split s ","))"#
+    )
+    .is_empty());
+}
+
+// korben-gs0
+#[test]
+fn an_overloaded_builtin_is_left_untyped() {
+    // `get` and friends dispatch on the collection, so they have no single
+    // signature. They must stay unchecked rather than be given a wrong one.
+    assert!(check(r#"(fn f [v: Vec String] -> String (get v 0 "d"))"#).is_empty());
+    assert!(check(r#"(fn f [m: Map String Int] -> Int (get m "k" 0))"#).is_empty());
+}
