@@ -99,6 +99,11 @@ impl Session {
             overlay: HashMap::new(),
             workspace: None,
         };
+        // korben-5wu
+        // Tasks run on stacks of their own, so they own a handle on the host
+        // rather than borrowing one. Installing it here covers every entry
+        // point -- CLI, REPL, tests -- because they all build a session first.
+        korben_runtime::task::set_host(session.interp.clone());
         session.load_prelude();
         session
     }
@@ -145,6 +150,11 @@ impl Session {
             overlay: HashMap::new(),
             workspace,
         };
+        // korben-5wu
+        // Tasks run on stacks of their own, so they own a handle on the host
+        // rather than borrowing one. Installing it here covers every entry
+        // point -- CLI, REPL, tests -- because they all build a session first.
+        korben_runtime::task::set_host(session.interp.clone());
         session.load_prelude();
         session.prepare_dependencies()?;
         Ok(session)

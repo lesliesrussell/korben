@@ -846,8 +846,7 @@ fn cmd_expand(args: &[String]) -> ExitCode {
         session.diagnostics.push(error);
     }
     let mut diagnostics = Diagnostics::new();
-    let expanded =
-        korben_core::expand::expand_module(&session.interp, &forms, &mut diagnostics);
+    let expanded = korben_core::expand::expand_module(&session.interp, &forms, &mut diagnostics);
     session.diagnostics.extend(diagnostics);
 
     if ui::report(&session.diagnostics, &session.sources, false) {

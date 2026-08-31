@@ -139,7 +139,9 @@ fn try_recv_does_not_drive_anything() {
     assert_eq!(result.output, "(None)\n(Some 42)\n");
 }
 
-/// A started task cannot suspend, so a cycle is reported rather than hung.
+/// A receive nothing can ever satisfy is reported rather than hung. Tasks can
+/// suspend now, so this is no longer "a started task cannot wait" -- it is the
+/// narrower thing: nobody holds the other end.
 #[test]
 fn a_receive_with_nothing_to_drive_is_a_reported_deadlock() {
     let result = run(&format!(
@@ -229,4 +231,86 @@ fn asynchronous_work_infers_the_async_effect() {
         ),
         vec!["undeclared-effect"]
     );
+}
+
+// ----------------------------------------------------------------- suspension
+
+// korben-5wu
+/// The capability this whole design exists for: a task parks partway through,
+/// something else runs while it is parked, and it resumes where it stopped.
+///
+/// The assertion that matters is `:suspended`, seen by another task. Before
+/// tasks had stacks of their own there was no such state -- a task that
+/// blocked ran everybody else from inside its own frames, so it stayed
+/// `:running` the entire time it was waiting, and the output order alone
+/// cannot tell those two worlds apart.
+#[test]
+fn a_task_parks_and_another_task_sees_it_suspended() {
+    let result = run(&format!(
+        "{HEADER}
+(async fn consume [receiver: Receiver] -> Int !async !io
+  (println \"consumer waits\")
+  (let value (match (receiver.recv) (Some v) v (None) 0))
+  (println \"consumer resumed with\" value)
+  value)
+(async fn produce [sender: Sender other: Task] -> Unit !async !io
+  (println \"producer sees consumer\" (other.state))
+  (sender.send 7)
+  (sender.close))
+(pub fn main [] -> Unit !io !async
+  (task-scope scope
+    (let ends (task.channel))
+    (let sender (get ends 0))
+    (let receiver (get ends 1))
+    (let consumer (spawn scope (consume receiver)))
+    (spawn scope (produce sender consumer))
+    (println \"total\" (await consumer))))"
+    ));
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert_eq!(
+        result.output,
+        "consumer waits\nproducer sees consumer :suspended\nconsumer resumed with 7\ntotal 7\n"
+    );
+}
+
+// korben-5wu
+/// A task waiting on another task is ordinary now, not a cycle. The waiter
+/// parks and the task it wants runs; both finish.
+#[test]
+fn a_task_may_wait_on_another_task() {
+    let result = run(&format!(
+        "{HEADER}
+(async fn slow [] -> Int !async !io (println \"slow ran\") 41)
+(async fn waiter [other: Task] -> Int !async !io
+  (println \"waiter waits\")
+  (+ 1 (await other)))
+(pub fn main [] -> Unit !io !async
+  (task-scope scope
+    (let first (spawn scope (slow)))
+    (let second (spawn scope (waiter first)))
+    (println (await second))))"
+    ));
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert_eq!(result.output, "waiter waits\nslow ran\n42\n");
+}
+
+// korben-5wu
+/// Suspension makes waiting legal, so the deadlock diagnostics have to earn
+/// their keep on what is still genuinely stuck. A task parked on a channel
+/// nobody holds the other end of must be reported, not hung -- and now it is
+/// reported from inside a parked task rather than from a task that never
+/// started.
+#[test]
+fn a_parked_task_nobody_can_satisfy_is_reported() {
+    let result = run(&format!(
+        "{HEADER}
+(async fn consume [receiver: Receiver] -> Int !async !io
+  (match (receiver.recv) (Some v) v (None) 0))
+(pub fn main [] -> Unit !io !async
+  (task-scope scope
+    (let ends (task.channel))
+    (let receiver (get ends 1))
+    (println (await (spawn scope (consume receiver))))))"
+    ));
+    assert_eq!(result.diagnostics, vec!["channel-deadlock"]);
 }

@@ -1097,10 +1097,10 @@ pub fn builtin(name: &str) -> Option<Value> {
         }),
 
         "std.async/join-all" => {
-            native("join-all", 1, |caller, args, loc| crate::task::join_all(caller, &args[0], loc))
+            native("join-all", 1, |_, args, loc| crate::task::join_all(&args[0], loc))
         }
         "std.async/join" => {
-            native("join", 1, |caller, args, loc| crate::task::await_value(caller, &args[0], loc))
+            native("join", 1, |_, args, loc| crate::task::await_value(&args[0], loc))
         }
         // An unbounded channel never makes a sender wait.
         "std.async/channel" => native("channel", 0, |_, _args, _| Ok(crate::task::channel(None))),
@@ -1114,12 +1114,10 @@ pub fn builtin(name: &str) -> Option<Value> {
         }
         "Task/cancel" => native("cancel", 1, |_, args, _| crate::task::cancel_task(&args[0])),
         "Task/state" => native("state", 1, |_, args, _| crate::task::task_state_name(&args[0])),
-        "Sender/send" => native("send", 2, |caller, args, loc| {
-            crate::task::send(caller, &args[0], args[1].clone(), loc)
-        }),
-        "Receiver/recv" => {
-            native("recv", 1, |caller, args, loc| crate::task::recv(caller, &args[0], loc))
+        "Sender/send" => {
+            native("send", 2, |_, args, loc| crate::task::send(&args[0], args[1].clone(), loc))
         }
+        "Receiver/recv" => native("recv", 1, |_, args, loc| crate::task::recv(&args[0], loc)),
         "Receiver/try-recv" => {
             native("try-recv", 1, |_, args, loc| crate::task::try_recv(&args[0], loc))
         }

@@ -160,9 +160,17 @@ enum Step {
     Wait,
 }
 
+// korben-5wu
 /// Let another ready task run, or report that none can.
-fn yield_or_wait(caller: &dyn Caller) -> Result<Step, Flow> {
-    match crate::task::drive_one(caller) {
+///
+/// This one deliberately does NOT park the waiting task, even though tasks can
+/// now suspend. A task blocked on a socket can only be woken by a peer, so
+/// parking it would leave the scheduler resuming it in a spin and then calling
+/// that a deadlock -- it is not one. Waking a parked task on socket readiness
+/// needs a reactor the scheduler polls; until then, waiting on the socket
+/// itself is both correct and cheaper.
+fn yield_or_wait(_caller: &dyn Caller) -> Result<Step, Flow> {
+    match crate::task::drive_one() {
         Some(result) => {
             result?;
             Ok(Step::Retry)
