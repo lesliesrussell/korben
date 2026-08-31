@@ -680,6 +680,15 @@ impl Checker {
                 io,
             )),
         );
+        // korben-0mo
+        define(
+            "std.fs/rename",
+            Scheme::mono(Type::function(
+                vec![string.clone(), string.clone()],
+                Type::result(unit.clone(), io_error.clone()),
+                io,
+            )),
+        );
         define(
             "std.fs/exists?",
             Scheme::mono(Type::function(vec![string.clone()], Type::bool(), io)),

@@ -233,6 +233,8 @@ pub const NAMES: &[&str] = &[
     // std.fs
     "std.fs/read-text",
     "std.fs/write-text",
+    // korben-0mo
+    "std.fs/rename",
     "std.fs/exists?",
     "std.fs/read-lines",
     "std.fs/list-dir",
@@ -878,6 +880,21 @@ pub fn builtin(name: &str) -> Option<Value> {
             Ok(match std::fs::write(&path, text) {
                 Ok(()) => Value::ok(Value::Nil),
                 Err(error) => Value::err(io_error(&path, &error)),
+            })
+        }),
+        // korben-0mo
+        // Renaming within a filesystem is atomic, which is what makes
+        // write-then-rename safe: a reader sees either the old file or the
+        // new one, never a half-written one. Without it a korben program has
+        // no way to replace a file without a window where it is truncated.
+        "std.fs/rename" => native("rename", 2, |_, args, loc| {
+            let from = as_string("fs.rename", &args[0], loc)?;
+            let to = as_string("fs.rename", &args[1], loc)?;
+            Ok(match std::fs::rename(&from, &to) {
+                Ok(()) => Value::ok(Value::Nil),
+                // The failure names the destination, which is the path the
+                // caller was trying to produce.
+                Err(error) => Value::err(io_error(&to, &error)),
             })
         }),
         "std.fs/exists?" => native("exists?", 1, |_, args, loc| {
