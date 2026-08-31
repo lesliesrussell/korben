@@ -161,7 +161,7 @@ enum Step {
 }
 
 /// Let another ready task run, or report that none can.
-fn yield_or_wait(caller: &mut dyn Caller) -> Result<Step, Flow> {
+fn yield_or_wait(caller: &dyn Caller) -> Result<Step, Flow> {
     match crate::task::drive_one(caller) {
         Some(result) => {
             result?;
@@ -265,7 +265,7 @@ pub fn connect(address: &str) -> Outcome {
 }
 
 // korben-48e
-pub fn accept(caller: &mut dyn Caller, value: &Value, loc: Loc) -> Outcome {
+pub fn accept(caller: &dyn Caller, value: &Value, loc: Loc) -> Outcome {
     let Some(handle) = as_listener(value) else {
         return Err(wrong("Listener.accept", "a Listener", value, loc));
     };
@@ -316,7 +316,7 @@ pub fn peer_address(value: &Value, loc: Loc) -> Outcome {
 
 /// Read whatever has arrived. An empty string means the peer is done.
 // korben-48e
-pub fn read(caller: &mut dyn Caller, value: &Value, loc: Loc) -> Outcome {
+pub fn read(caller: &dyn Caller, value: &Value, loc: Loc) -> Outcome {
     let Some(handle) = as_connection(value) else {
         return Err(wrong("Connection.read", "a Connection", value, loc));
     };
@@ -344,7 +344,7 @@ pub fn read(caller: &mut dyn Caller, value: &Value, loc: Loc) -> Outcome {
 }
 
 // korben-48e
-pub fn write(caller: &mut dyn Caller, value: &Value, text: &str, loc: Loc) -> Outcome {
+pub fn write(caller: &dyn Caller, value: &Value, text: &str, loc: Loc) -> Outcome {
     let Some(handle) = as_connection(value) else {
         return Err(wrong("Connection.write", "a Connection", value, loc));
     };

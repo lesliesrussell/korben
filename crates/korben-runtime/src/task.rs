@@ -133,7 +133,7 @@ pub fn spawn(scope: &Value, thunk: Value, loc: Loc) -> Outcome {
 /// This is what lets an operation that would block let something else make
 /// progress instead of stalling: a channel with nothing in it, and a socket
 /// with nothing on it, both come here before giving up.
-pub(crate) fn drive_one(caller: &mut dyn Caller) -> Option<Result<(), Flow>> {
+pub(crate) fn drive_one(caller: &dyn Caller) -> Option<Result<(), Flow>> {
     let ready = SCOPES.with(|scopes| {
         for scope in scopes.borrow().iter().rev() {
             for task in scope.tasks.borrow().iter() {
@@ -149,7 +149,7 @@ pub(crate) fn drive_one(caller: &mut dyn Caller) -> Option<Result<(), Flow>> {
 }
 
 /// Run a task to completion and record its outcome.
-fn run(caller: &mut dyn Caller, task: &Rc<TaskCell>) -> Outcome {
+fn run(caller: &dyn Caller, task: &Rc<TaskCell>) -> Outcome {
     let pending = {
         let mut state = task.state.borrow_mut();
         match &*state {
@@ -215,7 +215,7 @@ fn cancelled_value() -> Value {
 }
 
 /// Await a value. Anything that is not a task is already its own result.
-pub fn await_value(caller: &mut dyn Caller, value: &Value, _loc: Loc) -> Outcome {
+pub fn await_value(caller: &dyn Caller, value: &Value, _loc: Loc) -> Outcome {
     match as_task(value) {
         Some(task) => run(caller, &task),
         None => Ok(value.clone()),
@@ -226,7 +226,7 @@ pub fn await_value(caller: &mut dyn Caller, value: &Value, _loc: Loc) -> Outcome
 ///
 /// A task whose value is an `Err` is a failure too, which is what makes
 /// `(join-all tasks)?` read the way specification 15.2 writes it.
-pub fn join_all(caller: &mut dyn Caller, tasks: &Value, loc: Loc) -> Outcome {
+pub fn join_all(caller: &dyn Caller, tasks: &Value, loc: Loc) -> Outcome {
     let Value::Vector(items) = tasks else {
         return Err(Flow::fault(
             Fault::new("join-all", "`join-all` needs a vector of tasks", loc)
@@ -268,7 +268,7 @@ pub fn enter_scope(label: &str) -> Value {
 /// On the ordinary path every child is joined, so nothing outlives the scope
 /// and a child's failure reaches the code that started it. When the body is
 /// already failing, children are cancelled instead.
-pub fn exit_scope(caller: &mut dyn Caller, scope: &Value, failing: bool) -> Result<(), Flow> {
+pub fn exit_scope(caller: &dyn Caller, scope: &Value, failing: bool) -> Result<(), Flow> {
     let cell = as_scope(scope);
     SCOPES.with(|scopes| {
         scopes.borrow_mut().pop();
@@ -375,7 +375,7 @@ fn channel_error(message: &str) -> Value {
 }
 
 /// Send a value, driving other tasks if the channel is full.
-pub fn send(caller: &mut dyn Caller, sender: &Value, value: Value, loc: Loc) -> Outcome {
+pub fn send(caller: &dyn Caller, sender: &Value, value: Value, loc: Loc) -> Outcome {
     let Some(cell) = as_channel(sender, "Sender") else {
         return Err(wrong("send", "a Sender", sender, loc));
     };
@@ -412,7 +412,7 @@ pub fn send(caller: &mut dyn Caller, sender: &Value, value: Value, loc: Loc) -> 
 /// Receive a value, driving other tasks if the channel is empty.
 ///
 /// Returns `None` once the channel is closed and drained.
-pub fn recv(caller: &mut dyn Caller, receiver: &Value, loc: Loc) -> Outcome {
+pub fn recv(caller: &dyn Caller, receiver: &Value, loc: Loc) -> Outcome {
     let Some(cell) = as_channel(receiver, "Receiver") else {
         return Err(wrong("recv", "a Receiver", receiver, loc));
     };

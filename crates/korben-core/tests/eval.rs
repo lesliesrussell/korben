@@ -317,7 +317,7 @@ fn unknown_names_suggest_a_correction() {
     let _ = session.load_text("t", "(fn spam [] 1)\n(fn main [] (span))");
     let runtime = session.interp.module("t");
     let main = runtime.globals.borrow().get("main").cloned().unwrap();
-    session.interp.current = runtime;
+    *session.interp.current.borrow_mut() = runtime;
     let error = session
         .interp
         .apply(main, Vec::new(), korben_syntax::span::Span::synthetic())
@@ -569,4 +569,37 @@ fn tls_against_a_plain_socket_fails() {
         "TLS must not be established against a plain socket: {:?}",
         result.output
     );
+}
+
+// korben-bud
+/// The point of the `&self` evaluation path, asserted at compile time.
+///
+/// A task that suspends on its own stack keeps its borrow of the interpreter
+/// alive while the scheduler resumes another task, which needs a borrow of the
+/// same interpreter. Under `&mut dyn Caller` those were two live unique
+/// borrows of one object -- undefined behaviour, and the reason no amount of
+/// scheduler work could have made suspension sound.
+///
+/// This test would not compile against the old signature. That is the whole
+/// assertion; the writes are here only so the borrows are genuinely used.
+#[test]
+fn the_interpreter_is_reachable_through_two_live_borrows() {
+    use korben_core::eval::Output;
+    use korben_core::project::Session;
+    use korben_core::value::Caller;
+
+    // Not `mut`: capturing output no longer needs unique access either.
+    let session = Session::bare(std::path::PathBuf::from("."));
+    session.interp.out.replace(Output::Captured(String::new()));
+
+    let scheduler: &dyn Caller = &session.interp;
+    let suspended: &dyn Caller = &session.interp;
+    suspended.write("suspended ");
+    scheduler.write("resumed");
+
+    let written = match session.interp.out.replace(Output::Stdout) {
+        Output::Captured(text) => text,
+        Output::Stdout => String::new(),
+    };
+    assert_eq!(written, "suspended resumed");
 }

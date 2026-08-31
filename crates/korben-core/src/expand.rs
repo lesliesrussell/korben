@@ -131,7 +131,7 @@ impl<'a> Expander<'a> {
         let function = closure_value(Rc::new(Closure {
             decl: fn_decl,
             env: Env::root(),
-            module: self.interp.current.name.clone(),
+            module: self.interp.current.borrow().name.clone(),
         }));
         self.interp.macros.insert(decl.name.clone(), Rc::new(MacroEntry { decl, function }));
     }

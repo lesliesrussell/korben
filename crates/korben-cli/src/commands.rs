@@ -468,7 +468,7 @@ fn cmd_run(args: &[String]) -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    session.interp.current = runtime;
+    *session.interp.current.borrow_mut() = runtime;
     korben_runtime::std::set_program_args(flags.passthrough.clone());
     // korben-ycd
     if flags.has("profile") {
@@ -600,8 +600,8 @@ fn cmd_test(args: &[String]) -> ExitCode {
                 continue;
             }
         }
-        session.interp.current = runtime;
-        session.interp.out = Output::Captured(String::new());
+        *session.interp.current.borrow_mut() = runtime;
+        session.interp.out.replace(Output::Captured(String::new()));
         let env = Env::root();
 
         // Property tests bind each generator once per case.
@@ -638,7 +638,7 @@ fn cmd_test(args: &[String]) -> ExitCode {
             }
         }
 
-        let captured = match std::mem::replace(&mut session.interp.out, Output::Stdout) {
+        let captured = match session.interp.out.replace(Output::Stdout) {
             Output::Captured(text) => text,
             Output::Stdout => String::new(),
         };

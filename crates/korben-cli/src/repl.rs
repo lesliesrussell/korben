@@ -40,7 +40,7 @@ pub fn run(args: &[String]) -> ExitCode {
     // The REPL evaluates in its own module so definitions accumulate safely.
     let runtime = session.interp.module("repl");
     scope_project_into_repl(&mut session);
-    session.interp.current = runtime.clone();
+    *session.interp.current.borrow_mut() = runtime.clone();
     let env = Env::root();
     let stdin = std::io::stdin();
     let mut lines = stdin.lock().lines();
@@ -113,7 +113,8 @@ fn dispatch(command: &str, session: &mut Session, env: &Env, flags: &Flags) -> C
             report(&fresh.diagnostics, &fresh);
             *session = fresh;
             scope_project_into_repl(session);
-            session.interp.current = session.interp.module("repl");
+            let repl_module = session.interp.module("repl");
+            *session.interp.current.borrow_mut() = repl_module;
             if errors == 0 {
                 println!("{} {} module(s)", ui::green("reloaded"), session.modules.len());
             }
@@ -293,7 +294,7 @@ fn run_tests(session: &mut Session, filter: Option<String>, env: &Env) {
                 continue;
             }
         }
-        session.interp.current = runtime;
+        *session.interp.current.borrow_mut() = runtime;
         let scope = env.child();
         match session.interp.eval_body(&decl.body, &scope) {
             Ok(_) => {
@@ -308,7 +309,8 @@ fn run_tests(session: &mut Session, filter: Option<String>, env: &Env) {
             }
         }
     }
-    session.interp.current = session.interp.module("repl");
+    let repl_module = session.interp.module("repl");
+    *session.interp.current.borrow_mut() = repl_module;
     println!("{passed} passed, {failed} failed");
 }
 

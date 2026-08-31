@@ -15,7 +15,7 @@ use std::rc::Rc;
 ///
 /// Calling an `async fn` does not run it: it yields a task, which `await`,
 /// `join-all`, or the end of the enclosing scope will run.
-pub fn apply(caller: &mut dyn Caller, function: &Value, args: Vec<Arg>, loc: Loc) -> Outcome {
+pub fn apply(caller: &dyn Caller, function: &Value, args: Vec<Arg>, loc: Loc) -> Outcome {
     if let Value::Fn(callable) = function {
         if callable.is_async {
             return Ok(crate::task::defer(function.clone(), args, loc));
@@ -26,7 +26,7 @@ pub fn apply(caller: &mut dyn Caller, function: &Value, args: Vec<Arg>, loc: Loc
 
 /// Invoke a value, running an async function's body rather than deferring it.
 /// The scheduler uses this to start a task.
-pub fn apply_now(caller: &mut dyn Caller, function: &Value, args: Vec<Arg>, loc: Loc) -> Outcome {
+pub fn apply_now(caller: &dyn Caller, function: &Value, args: Vec<Arg>, loc: Loc) -> Outcome {
     let Value::Fn(callable) = function else {
         // Applying a non-function to no arguments yields the value itself,
         // which is what makes `(None)` and `(user.name)` read naturally.
@@ -53,7 +53,7 @@ pub fn apply_now(caller: &mut dyn Caller, function: &Value, args: Vec<Arg>, loc:
 }
 
 /// Invoke a function value, whatever kind of body it has.
-fn dispatch(caller: &mut dyn Caller, function: &Value, args: Vec<Arg>, loc: Loc) -> Outcome {
+fn dispatch(caller: &dyn Caller, function: &Value, args: Vec<Arg>, loc: Loc) -> Outcome {
     let Value::Fn(callable) = function else {
         return Ok(function.clone());
     };
@@ -440,7 +440,7 @@ pub fn bad_binding(value: &Value, loc: Loc) -> Flow {
 }
 
 /// Release a resource when a `with` scope exits, on every path.
-pub fn close_resource(caller: &mut dyn Caller, value: &Value, loc: Loc) {
+pub fn close_resource(caller: &dyn Caller, value: &Value, loc: Loc) {
     if let Some(method) = caller.find_method(value, "drop") {
         let _ = apply(caller, &method, vec![Arg::positional(value.clone())], loc);
     }
@@ -471,7 +471,7 @@ pub fn report(flow: Flow) -> String {
 /// up as a method on the receiver's type. Reading a field with no arguments is
 /// what makes `(user.name)` mean the field rather than a call.
 pub fn call_member(
-    caller: &mut dyn Caller,
+    caller: &dyn Caller,
     receiver: &Value,
     name: &str,
     args: Vec<Arg>,

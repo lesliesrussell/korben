@@ -245,7 +245,7 @@ fn register_impl(protocol: &str, type_name: &str, method: &str, value: Value) {
 struct Host;
 
 impl Caller for Host {
-    fn call_host(&mut self, function: &Value, _args: Vec<Arg>, loc: Loc) -> Outcome {
+    fn call_host(&self, function: &Value, _args: Vec<Arg>, loc: Loc) -> Outcome {
         Err(Flow::fault(
             korben_runtime::Fault::new(
                 "not-callable",
@@ -255,7 +255,7 @@ impl Caller for Host {
         ))
     }
 
-    fn find_method(&mut self, receiver: &Value, method: &str) -> Option<Value> {
+    fn find_method(&self, receiver: &Value, method: &str) -> Option<Value> {
         let type_name = receiver.type_name();
         let protocol = METHOD_OWNER.with(|owner| owner.borrow().get(method).cloned());
         if let Some(protocol) = protocol {
@@ -272,7 +272,7 @@ impl Caller for Host {
         korben_runtime::std::method_of(&type_name, method)
     }
 
-    fn write(&mut self, text: &str) {
+    fn write(&self, text: &str) {
         use std::io::Write;
         let mut stdout = std::io::stdout();
         let _ = stdout.write_all(text.as_bytes());
@@ -499,7 +499,7 @@ impl Generator {
 
         let _ = writeln!(
             self.out,
-            "fn f_{symbol}(__c: &mut dyn Caller, __args: Vec<Arg>, __loc: Loc) -> Outcome {{"
+            "fn f_{symbol}(__c: &dyn Caller, __args: Vec<Arg>, __loc: Loc) -> Outcome {{"
         );
         let _ = writeln!(self.out, "    thread_local! {{");
         let _ = writeln!(self.out, "        static SIG: CSignature = s_{symbol}();");
@@ -535,7 +535,7 @@ impl Generator {
 
         let _ = writeln!(
             self.out,
-            "fn f_{symbol}(__c: &mut dyn Caller, __args: Vec<Arg>, __loc: Loc) -> Outcome {{"
+            "fn f_{symbol}(__c: &dyn Caller, __args: Vec<Arg>, __loc: Loc) -> Outcome {{"
         );
         let _ = writeln!(self.out, "    let mut __args = __args;");
         let _ = writeln!(self.out, "    loop {{");
@@ -614,7 +614,7 @@ impl Generator {
             self.out,
             "    if let Some(value) = V.with(|slot| slot.borrow().clone()) {{ return Ok(value); }}"
         );
-        let _ = writeln!(self.out, "    let __c: &mut dyn Caller = &mut Host;");
+        let _ = writeln!(self.out, "    let __c: &dyn Caller = &Host;");
         // korben-str
         // The label exists for `?` to break to. A constant whose value never
         // propagates never breaks, and an unused label is a warning about code
@@ -1099,7 +1099,7 @@ impl Generator {
         }
         let _ = writeln!(
             out,
-            "Value::Fn(Rc::new(Function {{ name: {}.to_string(), is_async: false, params: {params_fn}(), body: Body::Rust(Box::new(move |__c: &mut dyn Caller, __args: Vec<Arg>, __loc: Loc| -> Outcome {{",
+            "Value::Fn(Rc::new(Function {{ name: {}.to_string(), is_async: false, params: {params_fn}(), body: Body::Rust(Box::new(move |__c: &dyn Caller, __args: Vec<Arg>, __loc: Loc| -> Outcome {{",
             quote(&lambda.name)
         );
         for (index, slot) in lambda.captures.iter().enumerate() {
