@@ -544,3 +544,53 @@ fn a_type_learned_later_is_recorded_resolved() {
         "an unresolved variable was recorded: {charted:?}"
     );
 }
+
+// korben-vok
+/// The chart is only useful to the code generator if the spans it is keyed by
+/// survive lowering. If they did not, `type_of` would answer `None` for
+/// everything and the whole thing would be an expensive no-op.
+#[test]
+fn the_lowered_program_can_be_asked_for_a_type() {
+    let source = r#"(fn f [n: Int] -> Int
+                      (let doubled (* n 2))
+                      doubled)
+                    (fn main [] -> Unit !io (println (f 21)))"#;
+    let mut session = korben_core::project::Session::bare(std::path::PathBuf::from("."));
+    let _ = session.load_text("t", source);
+    korben_core::infer::check_session(&mut session, false);
+    let program = korben_core::ir::lower_session(&session, "t").expect("lowering");
+
+    assert!(!program.types.is_empty(), "the program carried no types");
+
+    // Walk the lowered functions and ask about the spans they actually hold.
+    // At least some must answer, or the spans did not survive.
+    let mut answered = Vec::new();
+    for module in &program.modules {
+        for function in &module.functions {
+            collect_answers(&function.body, &program, &mut answered);
+        }
+    }
+    assert!(
+        answered.iter().any(|ty| ty == "Int"),
+        "no lowered expression could be asked its type: {answered:?}"
+    );
+}
+
+#[cfg(test)]
+fn collect_answers(
+    block: &korben_core::ir::Block,
+    program: &korben_core::ir::Program,
+    out: &mut Vec<String>,
+) {
+    use korben_core::ir::Stmt;
+    for statement in &block.stmts {
+        let expr = match statement {
+            Stmt::Let { value, .. } | Stmt::Var { value, .. } => value,
+            Stmt::Expr(expr) => expr,
+            Stmt::Defer { .. } => continue,
+        };
+        if let Some(ty) = program.type_of(expr.span()) {
+            out.push(ty.to_string());
+        }
+    }
+}
