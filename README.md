@@ -460,10 +460,23 @@ WALKTHROUGH.md     the toolchain run end to end, with real output
 LICENSE            MIT
 ```
 
-The implementation has no dependencies outside the Rust standard library, so the
-toolchain stays a single self-contained binary. `korben-runtime`'s source is
-embedded in it and written into each generated project, which is what keeps
-native builds reproducible and offline.
+The implementation carries no dependencies outside the Rust standard library
+today, so the toolchain stays a single self-contained binary. `korben-runtime`'s
+source is embedded in it and written into each generated project, which is what
+keeps native builds reproducible and offline.
+
+That is a default, not a prohibition. Some things should not be written here
+from scratch, and a rule that forces it makes the language worse rather than
+purer -- TLS is the clearest case: hand-rolling it would be irresponsible, and
+without it `std.http` can only speak `http://`.
+
+A dependency is worth taking when the alternative is implementing something
+security-critical, standardised, or large enough that our version would be the
+weaker one. It is not worth taking for convenience over a page of code we can
+own. Anything added should be widely used, actively maintained, and pinned; and
+because `korben-runtime`'s source is vendored into every generated project, a
+dependency there is one every korben program inherits -- so the bar is higher in
+the runtime than in the compiler or the CLI.
 
 ## Development
 
